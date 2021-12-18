@@ -147,6 +147,7 @@ namespace Obx
         void onRemoveDir();
         void onEnableDebug();
         void onBreak();
+        void onClearTerm();
         void handleGoBack();
         void handleGoForward();
         void onUpdateLocation(int line, int col );
@@ -171,6 +172,9 @@ namespace Obx
         void onBreakOnExceptions();
         void onRowColMode();
         void onSetInputFile();
+        void openRecentFile();
+        void setCurrentFile(const QString &fileName);
+        void updateRecentFileActions();
     private:
         class DocTab;
         DocTab* d_tab;
@@ -211,6 +215,9 @@ namespace Obx
         quint8 d_curLevel;
         QHash<QByteArray, QSet<quint32> > d_breakPoints; // module name -> line number
         QHash<Module*,quint32> d_loadedAssemblies; // -> assemblyId
+        enum { MaxRecentFiles = 5 };
+        QAction *recentFileActs[MaxRecentFiles];
+        QAction *separatorAct;
     };
 }
 

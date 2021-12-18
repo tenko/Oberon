@@ -417,6 +417,12 @@ Ide::Ide(QWidget *parent)
     setCorner( Qt::TopRightCorner, Qt::RightDockWidgetArea );
     setCorner( Qt::TopLeftCorner, Qt::LeftDockWidgetArea );
 
+    for (int i = 0; i < MaxRecentFiles; ++i) {
+        recentFileActs[i] = new QAction(this);
+        recentFileActs[i]->setVisible(false);
+        connect(recentFileActs[i], SIGNAL(triggered()), this, SLOT(openRecentFile()));
+    }
+    
     createMods();
     createMod();
     createHier();
@@ -759,6 +765,12 @@ void Ide::createMenuBar()
     pop->addCommand( "Open Project...", this, SLOT(onOpenPro()), tr("CTRL+O"), false );
     pop->addCommand( "Save Project", this, SLOT(onSavePro()), tr("CTRL+SHIFT+S"), false );
     pop->addCommand( "Save Project as...", this, SLOT(onSaveAs()) );
+
+    separatorAct = pop->addSeparator();
+    for (int i = 0; i < MaxRecentFiles; ++i)
+        pop->addAction(recentFileActs[i]);
+    updateRecentFileActions();
+    
     pop->addSeparator();
     pop->addCommand( "Save", this, SLOT(onSaveFile()), tr("CTRL+S"), false );
     pop->addCommand( tr("Close file"), d_tab, SLOT(onCloseDoc()), tr("CTRL+W") );
@@ -778,6 +790,10 @@ void Ide::createMenuBar()
     pop->addAutoCommand( "Cut", SLOT(handleEditCut()), tr("CTRL+X"), true );
     pop->addAutoCommand( "Copy", SLOT(handleEditCopy()), tr("CTRL+C"), true );
     pop->addAutoCommand( "Paste", SLOT(handleEditPaste()), tr("CTRL+V"), true );
+    pop->addSeparator();
+    pop->addAutoCommand( "Duplicate Line", SLOT(handleEditDupLine()), tr("CTRL+D"), true );
+    pop->addAutoCommand( "UPPER Selection", SLOT(handleEditUpper()), tr("CTRL+SHIFT+U"), true );
+    pop->addAutoCommand( "lower Selection", SLOT(handleEditLower()), tr("CTRL+U"), true );
     pop->addSeparator();
     pop->addAutoCommand( "Find...", SLOT(handleFind()), tr("CTRL+F"), true );
     pop->addAutoCommand( "Find again", SLOT(handleFindAgain()), tr("F3"), true );
@@ -807,6 +823,9 @@ void Ide::createMenuBar()
     pop->addCommand( "Export IL...", this, SLOT(onExportIl()) );
     pop->addCommand( "Export C...", this, SLOT(onExportC()) );
     pop->addCommand( "Run", this, SLOT(onRun()), tr("CTRL+R"), false );
+    
+    pop->addSeparator();
+    pop->addCommand( "Clear Output", this, SLOT(onClearTerm()), tr("CTRL+SHIFT+C"), false );
 
     pop = new Gui::AutoMenu( tr("Debug"), this );
     pop->addCommand( "Enable Debugging", this, SLOT(onEnableDebug()),tr(OBN_ENDBG_SC), false );
@@ -922,15 +941,17 @@ void Ide::onOpenPro()
     d_pro->loadFrom(fileName);
 
     compile();
+    setCurrentFile(fileName);
 }
 
 void Ide::onSavePro()
 {
     ENABLED_IF( d_pro->isDirty() );
 
-    if( !d_pro->getProjectPath().isEmpty() )
+    if( !d_pro->getProjectPath().isEmpty() ) {
         d_pro->save();
-    else
+        setCurrentFile(d_pro->getProjectPath());
+    } else
         onSaveAs();
 }
 
@@ -960,6 +981,7 @@ void Ide::onSaveAs()
         fileName += ".obxpro";
 
     d_pro->saveTo(fileName);
+    setCurrentFile(fileName);
     onCaption();
 }
 
@@ -1647,6 +1669,12 @@ void Ide::onBreak()
     // we cannot support break yet because Mono might stop at a place where a step command leads to a VM crash.
     //d_suspended = true;
     //d_dbg->suspend();
+}
+
+void Ide::onClearTerm()
+{
+    ENABLED_IF(true);
+    d_term->clear();
 }
 
 bool Ide::checkSaved(const QString& title)
@@ -2939,6 +2967,16 @@ void Ide::clear()
 
 bool Ide::checkEngine(bool withFastasm)
 {
+#ifdef Q_OS_WIN
+    QSettings s("HKEY_LOCAL_MACHINE\\SOFTWARE\\Mono", QSettings::NativeFormat);
+    if (s.contains("SdkInstallRoot")) {
+        d_eng->setMonoDir(s.value("SdkInstallRoot").toString() + "\\bin");
+    } else {
+        d_eng->setMonoDir(QApplication::applicationDirPath() + "\\mono");
+    }
+   return true;
+#else
+    
     QDir monoPath( QApplication::applicationDirPath() );
     if( !monoPath.cd("mono") )
     {
@@ -2955,6 +2993,7 @@ bool Ide::checkEngine(bool withFastasm)
     }
     d_eng->setMonoDir(monoPath.absolutePath());
     return true;
+#endif
 }
 
 static QByteArray monoEscape( const QByteArray& name )
@@ -3301,6 +3340,44 @@ void Ide::onSetInputFile()
     if( path.isEmpty() )
         return;
     d_eng->setInputFile(path);
+}
+
+void Ide::setCurrentFile(const QString &fileName)
+{
+    QSettings settings;
+    QStringList files = settings.value("recentFileList").toStringList();
+    files.removeAll(fileName);
+    files.prepend(fileName);
+    while (files.size() > MaxRecentFiles)
+        files.removeLast();
+    settings.setValue("recentFileList", files);
+    updateRecentFileActions();
+}
+
+void Ide::updateRecentFileActions()
+{
+    QSettings settings;
+    QStringList files = settings.value("recentFileList").toStringList();
+
+    int numRecentFiles = qMin(files.size(), (int)MaxRecentFiles);
+
+    for (int i = 0; i < numRecentFiles; ++i) {
+        QString text = tr("&%1 %2").arg(i + 1).arg(QFileInfo(files[i]).fileName());
+        recentFileActs[i]->setText(text);
+        recentFileActs[i]->setData(files[i]);
+        recentFileActs[i]->setVisible(true);
+    }
+    for (int j = numRecentFiles; j < MaxRecentFiles; ++j)
+        recentFileActs[j]->setVisible(false);
+
+    separatorAct->setVisible(numRecentFiles > 0);
+}
+
+void Ide::openRecentFile()
+{
+    QAction *action = qobject_cast<QAction *>(sender());
+    if (action)
+        loadFile(action->data().toString());
 }
 
 int main(int argc, char *argv[])
