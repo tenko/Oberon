@@ -129,6 +129,7 @@ struct ObxCGenImp : public AstVisitor
 {
     Errors* err;
     Module* thisMod;
+    QByteArray modName;
     int level;
     QTextStream h,b;
     QIODevice* park;
@@ -152,7 +153,7 @@ struct ObxCGenImp : public AstVisitor
 #else
     QList<QPair<QByteArray,bool> > temps;
 #endif
-
+    QList<int> sellLater;
 
     ObxCGenImp():err(0),thisMod(0),ownsErr(false),level(0),debug(false),anonymousDeclNr(1),
         curProc(0),curVarDecl(0),park(0){}
@@ -174,10 +175,13 @@ struct ObxCGenImp : public AstVisitor
         return temps.size() - 1;
     }
 
-    void sellTemp(int i)
+    void sellTemp(int i, bool later = true) // if default false then crash with GCC 4.8 -O2
     {
         Q_ASSERT( i >= 0 && i < temps.size() );
-        temps[i].d_inUse = false;
+        if( later )
+            sellLater.append(i);
+        else
+            temps[i].d_inUse = false;
     }
 #else
     int buyTemp( const QByteArray& type )
@@ -194,10 +198,13 @@ struct ObxCGenImp : public AstVisitor
         return temps.size() - 1;
     }
 
-    void sellTemp(int i)
+    void sellTemp(int i, bool later = true )
     {
         Q_ASSERT( i >= 0 && i < temps.size() );
-        temps[i].second = false;
+        if( later )
+            sellLater.append(i);
+        else
+            temps[i].second = false;
     }
 #endif
 
@@ -461,7 +468,7 @@ struct ObxCGenImp : public AstVisitor
         return formatReturn(pt, "(*" + name + ")" + formatFormals(pt, false));
     }
 
-    QByteArray formatType( Type* t, const QByteArray& name = QByteArray() )
+    QByteArray formatType( Type* t, const QByteArray& name = QByteArray(), bool comingFromPointer = false )
     {
         if( t == 0 )
             return "void" + ( !name.isEmpty() ? " " + name : "" );
@@ -534,7 +541,7 @@ struct ObxCGenImp : public AstVisitor
                     }
                 }
                 // else
-                return formatType( me->d_to.data(), res );
+                return formatType( me->d_to.data(), res, true );
             }
             break;
         case Thing::T_ProcType:
@@ -564,7 +571,7 @@ struct ObxCGenImp : public AstVisitor
                 }else
                     return "???";
 #else
-                return formatType(me->d_quali->d_type.data(),name);
+                return formatType(me->d_quali->d_type.data(),name,comingFromPointer);
 #endif
             }
             break;
@@ -574,7 +581,7 @@ struct ObxCGenImp : public AstVisitor
                 // the declaration order deadlock caused by mutual dependency of generic modules with the ones
                 // where the instantiated types are declared
                 Record* r = cast<Record*>(t);
-                if( !thisMod->d_metaActuals.isEmpty() && curVarDecl && declToInline.contains(r) )
+                if( !thisMod->d_metaActuals.isEmpty() && curVarDecl && declToInline.contains(r) && !comingFromPointer )
                 {
                     QByteArray res = (r->d_union ? "union /*" : "struct /*" ) + classRef(r) + "*/ { ";
                     if( !r->d_unsafe )
@@ -634,6 +641,11 @@ struct ObxCGenImp : public AstVisitor
             return;
         r->d_slotAllocated = true;
 
+        QList<Field*> fields = r->getOrderedFields();
+
+        if( r->d_unsafe && fields.isEmpty() )
+            return; // aparently it's just a pointer type, done with forward decl;
+
         const QByteArray className = classRef(r);
         h << ws() << (r->d_union ? "union " : "struct " ) << className << " {" << endl;
         level++;
@@ -641,7 +653,6 @@ struct ObxCGenImp : public AstVisitor
         if( !r->d_unsafe )
             h << ws() << "struct " << className << "$Class$* class$;" << endl;
 
-        QList<Field*> fields = r->getOrderedFields();
 
         foreach( Field* f, fields )
             f->accept(this);
@@ -661,7 +672,12 @@ struct ObxCGenImp : public AstVisitor
                 {
                 case Thing::T_Record:
                     if( !td->d_unsafe )
-                        b << ws() << classRef(td) << "$init$(&inst->" << escape(f->d_name) << ");" << endl;
+                    {
+                        b << ws() << classRef(td) << "$init$(";
+                        if( declToInline.contains(cast<Record*>(td) ) )
+                            b << "(struct " << classRef(td) << "*)";
+                        b << "&inst->" << escape(f->d_name) << ");" << endl;
+                    }
                     break;
                 case Thing::T_Array:
                     emitArrayInit( cast<Array*>(td), "inst->" + escape(f->d_name));
@@ -718,6 +734,7 @@ struct ObxCGenImp : public AstVisitor
         const QByteArray moduleName = moduleRef(me);
         h << "#ifndef _" << moduleName.toUpper() << "_" << endl;
         h << "#define _" << moduleName.toUpper() << "_" << endl << endl;
+        modName = moduleName;
 
         dedication(h);
 
@@ -980,6 +997,12 @@ struct ObxCGenImp : public AstVisitor
     void emitStatement(Statement* s)
     {
         s->accept(this);
+        if( !sellLater.isEmpty() )
+        {
+            foreach( int t, sellLater )
+                sellTemp(t, false);
+            sellLater.clear();
+        }
     }
 
     void visit( Procedure* me)
@@ -1012,9 +1035,9 @@ struct ObxCGenImp : public AstVisitor
             {
             case Thing::T_LocalVar:
                 {
-                    curVarDecl = n.data();
+                    //TODO curVarDecl = n.data();
                     b << ws() << formatType( n->d_type.data(), escape(n->d_name) ) << ";" << endl;
-                    curVarDecl = 0;
+                    //curVarDecl = 0;
                 }
                 break;
             case Thing::T_Parameter:
@@ -1439,11 +1462,15 @@ struct ObxCGenImp : public AstVisitor
         switch( td->getTag() )
         {
         case Thing::T_Record:
-            qDebug() << "DEFAULT(record)" << thisMod->getName();
             if( td->d_unsafe )
                 b << "(" << formatType(td) << "){0}"; // partial init sets all members to zero
             else
-                b << "(" << formatType(td) << "){ &" << classRef(td) << "$class$ }";
+            {
+                const int t = buyTemp(formatType(td,"*"));
+                b << "($t" << t << "= &(" << formatType(td) << "){0}, "
+                  << "$t" << t << "->class$ = &" << classRef(td) << "$class$, *$t" << t << ")";
+                sellTemp(t);
+            }
             break;
         case Thing::T_Array:
             {
@@ -1883,6 +1910,16 @@ struct ObxCGenImp : public AstVisitor
                         b << ", ";
                         d++;
                     }
+                    for( int i = d; i < dims.size(); i++ )
+                    {
+                        // happens if e.g. generic vector has an array actual type
+                        if( dims[i]->d_lenExpr.isNull() )
+                            continue;
+                        b << "$" << d << " = " << dims[i]->d_len << ", ";
+                        d++;
+                    }
+                    if( d != dims.size() )
+                        qWarning() << "invalid array initialization in" << modName << ae->d_loc.d_col << ae->d_loc.d_col;
                     b << "$n = ";
                     for( int i = 0; i < d; i++ )
                     {
@@ -2426,11 +2463,14 @@ struct ObxCGenImp : public AstVisitor
     {
         Q_ASSERT( lhs );
 
+        Type* tr = derefed(rhs->d_type.data());
+
         // if rhs is a call, we need a compound literal for addrOf, otherwise the
         // C compiler complains that it is not an lvalue
         const bool tempStore = addrOf &&
                 ( rhs->getUnOp() == UnExpr::CALL ||
                                            ( rhs->getUnOp() == UnExpr::DEREF
+                                             && tr && tr->getTag() == Thing::T_Array && !tr->d_unsafe
                                              && cast<UnExpr*>(rhs)->d_sub->getUnOp() == UnExpr::CALL ) );
         if( tempStore )
         {
@@ -2502,9 +2542,14 @@ struct ObxCGenImp : public AstVisitor
                 b << "($t" << fptr << " = ";
 #endif
                 b << "((" << formatType(p->d_receiverRec,"*") << ")($t" << self << " = ";
+#if 0
+                // causes lvalue error if d_sub is a function call
                 b << "&(";
                 method->d_sub->accept(this);
                 b << ")";
+#else
+                renderArg2(method->d_sub->d_type.data(),method->d_sub.data(),true);
+#endif
                 b << "))->class$->" << escape( method->getIdent()->d_name);
 #ifdef _OBX_FUNC_SEQ_POINT_
                 b << ", " << "$t" << fptr;
@@ -2558,9 +2603,14 @@ struct ObxCGenImp : public AstVisitor
                 b << "($t" << fptr << " = ";
 #endif
             b << "((" << formatType(p->d_receiverRec,"*") << ")($t" << self << " = ";
+#if 1
+            // TODO is this ok or is it necessary to handle like !superCall above?
             b << "&(";
             method->d_sub->accept(this);
             b << ")";
+#else
+            renderArg2(method->d_sub->d_type.data(),method->d_sub.data(),true);
+#endif
             b << "))->class$->super$->" << escape( method->getIdent()->d_name);
 #ifdef _OBX_FUNC_SEQ_POINT_
                 b << ", " << "$t" << fptr;
@@ -3525,9 +3575,6 @@ bool Obx::CGen2::translateAll(Obx::Project* pro, bool debug, const QString& wher
     bout << "or on Windows with MSVC:" << endl;
     bout << "cl /O2 /MD /Fe:OBX.Main.exe /DOBX_USE_BOEHM_GC /Iinclude *.c gcmt-dll.lib" << endl;
     bout << "if on Unix/Linux/macOS dynamic libraries should be loaded add -DOBX_USE_DYN_LOAD -ldl" << endl;
-    bout << "Note that MSVC produces crashing code in certain cases (e.g. DeltaBlue and Havlak examples)" << endl;
-    bout << "Note that -O2 of GCC/MinGW versions 4.x and 5.x (but not 8.x) produces crashing code e.g. with Havlak" << endl;
-    bout << "Note that no issues were observed so far with CLANG" << endl;
     bout.flush();
     fout.flush();
 
