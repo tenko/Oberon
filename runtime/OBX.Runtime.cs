@@ -479,5 +479,21 @@ namespace OBX
 		{
 			return String.Format("0x{0:x}",adr);
 		}
+		
+		public static long Ash64(long x, int n, bool arithmetic)
+		{
+			if( n >= 0 )
+				return x << n;
+			else
+				return x >> (-n); // uses shr.un
+		}
+
+		public static int Ash32(int x, int n, bool arithmetic)
+		{
+			if( n >= 0 )
+				return x << n;
+			else
+				return x >> (-n); // uses shr.un
+		}
 	}
 }

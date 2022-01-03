@@ -415,10 +415,11 @@ namespace Obx
     {
         QVariant d_val;
         uint d_vtype : 8;
-        uint d_strLen : 23;
-        uint d_wide : 1; // mark WSTRING and WCHAR
+        uint d_strLen : 22;
+        uint d_wide : 1; // mark WSTRING and WCHAR, double vs float, longint vs integer
+        uint d_minInt : 1;
         Ref<Expression> d_constExpr;
-        Const():d_vtype(0),d_wide(false),d_strLen(0){}
+        Const():d_vtype(0),d_wide(false),d_strLen(0),d_minInt(false){}
         Const(const QByteArray& name, Literal* lit );
         int getTag() const { return T_Const; }
         void accept(AstVisitor* v) { v->visit(this); }
@@ -452,17 +453,20 @@ namespace Obx
                // IDE
                TRAP, TRAPIF, TRACE, NOP, LDMOD, LDCMD,
                // SYSTEM
-               SYS_ADR, SYS_BIT, SYS_GET, SYS_H, SYS_LDREG, SYS_PUT, SYS_REG, SYS_VAL, SYS_COPY,
+               SYS_ADR, SYS_BIT, SYS_GET, SYS_H, SYS_LDREG, SYS_PUT, SYS_REG, SYS_VAL, SYS_COPY, // obsolete
                // Oberon-2
-               MAX, CAP, LONG, SHORT, HALT, COPY, ASH, MIN, BYTESIZE, ENTIER, // BYTESIZE is SIZE in BB
+               MAX, CAP, LONG, SHORT, HALT, COPY, ASH, MIN, BYTESIZE, ENTIER, // BYTESIZE=SIZE
                // Blackbox
                BITS,
                // Oberon-2 SYSTEM
-               SYS_MOVE, SYS_NEW, SYS_ROT, SYS_LSH, SYS_GETREG, SYS_PUTREG,
+               SYS_MOVE, SYS_NEW, SYS_ROT, SYS_LSH, SYS_GETREG, SYS_PUTREG, // obsolete
                // Blackbox SYSTEM
                SYS_TYP,
                // Oberon+
-               VAL, STRLEN, WCHR, PRINTLN, DEFAULT, BITAND, BITNOT, BITOR, BITXOR, ADR, MAXBUILTIN
+               VAL, STRLEN, WCHR, PRINTLN, DEFAULT, BITAND, BITNOT, BITOR, BITXOR,
+               BITSHL, BITSHR, BITASR,
+               ADR, // obsolete
+               MAXBUILTIN
              };
         static const char* s_typeName[];
         quint8 d_func;
@@ -636,11 +640,12 @@ namespace Obx
                          Char /* quint16 */, Nil, Set, Enum };
         QVariant d_val;
         uint d_vtype : 8;
-        uint d_strLen : 23;
-        uint d_wide : 1; // mark WSTRING and WCHAR, or double precision float
+        uint d_strLen : 22;
+        uint d_wide : 1; // mark WSTRING and WCHAR, or double precision float, or LONGINT
+        uint d_minInt : 1; // integer type is at least INTEGER
         Literal( ValueType t = Invalid, Ob::RowCol l = Ob::RowCol(),
                  const QVariant& v = QVariant(), Type* typ = 0 ):
-                        d_val(v),d_vtype(t),d_strLen(0),d_wide(0){ d_loc = l; d_type = typ; }
+                        d_val(v),d_vtype(t),d_strLen(0),d_wide(0),d_minInt(0){ d_loc = l; d_type = typ; }
         int getTag() const { return T_Literal; }
         void accept(AstVisitor* v) { v->visit(this); }
         static bool isWide( const QString& );

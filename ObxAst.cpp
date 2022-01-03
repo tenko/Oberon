@@ -45,14 +45,15 @@ const char* BuiltIn::s_typeName[] =
     "CHR", "INC", "DEC", "INCL", "EXCL", "NEW", "ASSERT", "PACK", "UNPK",
     "LED", "TRAP", "TRAPIF", "TRACE", "NOP", "LDMOD", "LDCMD",
     "ADR", "BIT", "GET", "H", "LDREG", "PUT", "REG", "VAL", "COPY",
-    "MAX", "CAP", "LONG", "SHORT", "HALT", "COPY", "ASH", "MIN", "BYTESIZE", "ENTIER",
+    "MAX", "CAP", "LONG", "SHORT", "HALT", "COPY", "ASH", "MIN", "SIZE", "ENTIER",
     "BITS",
     // Oberon-2 SYSTEM
     "MOVE", "NEW", "ROT", "LSH", "GETREG", "PUTREG",
     // Blackbox
     "TYP",
     // Oberon+
-    "VAL", "STRLEN", "WCHR", "PRINTLN", "DEFAULT", "BITAND", "BITNOT", "BITOR", "BITXOR", "ADR"
+    "VAL", "STRLEN", "WCHR", "PRINTLN", "DEFAULT", "BITAND", "BITNOT", "BITOR", "BITXOR",
+    "BITSHL", "BITSHR", "BITASR", "ADR"
 };
 
 const char* UnExpr::s_opName[] =
@@ -1205,12 +1206,14 @@ Const::Const(const QByteArray& name, Literal* lit)
     d_constExpr = lit;
     d_vtype = 0;
     d_wide = false;
+    d_minInt = false;
     if( lit )
     {
         d_type = lit->d_type.data();
         d_val = lit->d_val;
         d_vtype = lit->d_vtype;
         d_wide = lit->d_wide;
+        d_minInt = lit->d_minInt;
     }
 }
 
