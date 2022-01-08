@@ -138,8 +138,9 @@ public:
     void setExt( bool on )
     {
         d_hl->setEnableExt(on);
-        for( int i = BuiltIn::ABS; i < BuiltIn::MAXBUILTIN; i++ )
-            d_hl->addBuiltIn(BuiltIn::s_typeName[i]);
+        const QByteArrayList names = BuiltIn::getValidNames();
+        foreach( const QByteArray& name, names )
+            d_hl->addBuiltIn(name);
         for( int i = Type::ANY; i <= Type::SET; i++ )
             d_hl->addBuiltIn(BaseType::s_typeName[i]);
         d_hl->addBuiltIn("ANYREC");
@@ -1787,7 +1788,7 @@ bool Ide::generate()
     // Pelib is factor 1.4 faster than Fastasm for generating the IL and factor ~3 incl. IL to assembly compilation;
     // compared to ilasm.exe for compilation (instead of fastasm.exe) Pelib is even a factor 29 faster.
 
-    const QString buildPath = d_pro->getBuildDir();
+    const QString buildPath = d_pro->getBuildDir(true);
     QDir buildDir(buildPath);
     if( !buildDir.mkpath(buildPath) )
     {
@@ -1843,7 +1844,7 @@ bool Ide::run()
         return false;
     if( !checkEngine() )
         return false;
-    QDir buildDir( d_pro->getBuildDir() );
+    QDir buildDir( d_pro->getBuildDir(true) );
     if( d_debugging && buildDir.entryList(QStringList() << "*.mdb", QDir::Files ).isEmpty() )
     {
         logMessage("No debugging information found, using bytecode level debugger",SysInfo);
@@ -1851,7 +1852,7 @@ bool Ide::run()
     }
     logMessage("\nStarting application...\n\n",SysInfo,false);
     d_eng->init( d_debugging ? d_dbg->open() : 0 );
-    d_eng->setAssemblySearchPaths( QStringList() << d_pro->getBuildDir(), true );
+    d_eng->setAssemblySearchPaths( QStringList() << d_pro->getBuildDir(true), true );
     d_eng->setEnv( "OBERON_FILE_SYSTEM_ROOT", d_pro->getWorkingDir(true) );
     d_eng->run( buildDir.absoluteFilePath("Main#.exe"));
     d_status = Running;
@@ -2364,7 +2365,7 @@ void Ide::fillStack()
                         d_lock = true;
                         edit->dbgRow = loc.row - 1;
                         edit->dbgCol = qMax(0,loc.col - 1);
-                        edit->setCursorPosition( edit->dbgRow, edit->dbgCol, center );
+                        edit->setCursorPosition( edit->dbgRow, edit->dbgCol, true );
                         edit->setPositionMarker(edit->dbgRow);
                         d_lock = false;
                     }
@@ -2385,7 +2386,7 @@ void Ide::fillLocals()
     d_localsView->clear();
     d_il->clear();
 
-    if( d_curLevel >= 0 && d_curLevel < d_stack.size() )
+    if( d_curLevel < d_stack.size() )
     {
         if( d_mode == BytecodeMode )
             d_il->load(d_stack[d_curLevel].method, d_stack[d_curLevel].il_offset );
@@ -3179,7 +3180,7 @@ void Ide::onFinished(int exitCode, bool normalExit)
 {
     if( d_status == Generating )
     {
-        QDir outDir(d_pro->getBuildDir());
+        QDir outDir(d_pro->getBuildDir(true));
         QFile files(outDir.absoluteFilePath("modules"));
         if( files.open(QIODevice::ReadOnly) )
         {
@@ -3386,7 +3387,7 @@ int main(int argc, char *argv[])
     a.setOrganizationName("me@rochus-keller.ch");
     a.setOrganizationDomain("github.com/rochus-keller/Oberon");
     a.setApplicationName("Oberon+ IDE (Mono)");
-    a.setApplicationVersion("0.9.41");
+    a.setApplicationVersion("0.9.46");
     a.setStyle("Fusion");    
     QFontDatabase::addApplicationFont(":/font/DejaVuSansMono.ttf"); // "DejaVu Sans Mono"
 

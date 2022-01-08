@@ -30,7 +30,7 @@ class SignatureLexer
 {
 public:
     enum TokenType { Invalid, Done, ID, QSTRING, CLASS, VALUETYPE, LBRACK, RBRACK, ARR,
-                     DBLCOLON, SLASH, LPAR, RPAR, AMPERS, COMMA, DOT, STAR, VARARG, SENTINEL, PINNED };
+                     DBLCOLON, SLASH, LPAR, RPAR, AMPERS, COMMA, DOT, STAR, VARARG, SENTINEL, PINNED, MODOPT };
     struct Token
     {
         quint8 d_tt; // TokenType
@@ -158,6 +158,8 @@ protected:
             return Token(VARARG,pos);
         if( str == "pinned" )
             return Token(PINNED,pos);
+        if( str == "modopt" )
+            return Token(MODOPT,pos);
         return Token(ID,pos,str);
     }
     bool get( char* ch )
@@ -221,7 +223,8 @@ class SignatureParser
 {
 public:
     // ref      ::= typeRef | membRef
-    // typeRef  ::= ( [ 'class' | 'valuetype' ] [ assembly ] path | primType ) {'*'} {'[]'} ['pinned']
+    // typeRef  ::= ( [ 'class' | 'valuetype' ] [ assembly ] path | primType ) {'*'} {'[]'} ['pinned'] [ modopt ]
+    // modopt   ::= 'modopt' '(' typeRef ')'
     // primType ::= [ 'native' ][ 'unsigned' ] ID
     // membRef  ::= [ 'vararg' ] typeRef [ 'class' | 'valuetype' ] [ assembly ] path '::' dottedNm [ params ]
     // assembly ::= '[' dottedNm ']'
@@ -557,52 +560,19 @@ protected:
         if( node->thing == 0 )
             createClassFor(node,isValueType);
 
-        QByteArray pointer;
+        QByteArray pattern;
         int pointerLevel = 0;
         while( lex.peek().d_tt == SignatureLexer::STAR )
         {
             lex.next();
-            pointer += "*";
+            pattern += "*";
             pointerLevel++;
         }
-        if( pointerLevel )
-        {
-            // TODO: combinations of * and []
-            if( Type* primitive = dynamic_cast<Type*>(node->thing) )
-            {
-                Node* suffix = node->subs.value(pointer);
-                if( suffix == 0 )
-                {
-                    suffix = new Node(node,pointer);
-                    node->subs.insert(pointer,suffix);
-                    Type* t = new Type(primitive->GetBasicType());
-                    t->PointerLevel(pointerLevel);
-                    suffix->thing = t;
-                }
-                node = suffix;
-            }else
-            {
-                DataContainer* dc = dynamic_cast<DataContainer*>(node->thing);
-                Q_ASSERT(dc);
-                Node* suffix = node->subs.value(pointer);
-                if( suffix == 0 )
-                {
-                    suffix = new Node(node,pointer);
-                    node->subs.insert(pointer,suffix);
-                    Type* t = new Type(dc);
-                    t->PointerLevel(pointerLevel);
-                    suffix->thing = t;
-                }
-                node = suffix;
-            }
-        }
-
-        QByteArray array;
         int arrayLevel = 0;
         while( lex.peek().d_tt == SignatureLexer::ARR )
         {
             lex.next();
-            array += "[]";
+            pattern += "[]";
             arrayLevel++;
         }
         bool pinned = false;
@@ -611,39 +581,57 @@ protected:
             lex.next();
             pinned = true;
             Q_ASSERT( arrayLevel > 0 ); // we currently only support pinned arrays
-            array += " pinned";
+            pattern += " pinned";
+        }
+        Node* modopt = 0;
+        if( lex.peek().d_tt == SignatureLexer::MODOPT )
+        {
+            lex.next();
+            if( lex.next().d_tt != SignatureLexer::LPAR )
+                throw "LPAR expected in MODOPT";
+            modopt = typeRef();
+            if( lex.next().d_tt != SignatureLexer::RPAR )
+                throw "RPAR expected in MODOPT";
+            pattern += " modopt";
         }
         if( Type* primitive = dynamic_cast<Type*>(node->thing) )
         {
-            if( arrayLevel == 0 )
+            if( pattern.isEmpty() )
                 return node;
             // else
-            Node* suffix = node->subs.value(array);
+            Node* suffix = node->subs.value(pattern);
             if( suffix == 0 )
             {
-                suffix = new Node(node,array);
-                node->subs.insert(array,suffix);
+                suffix = new Node(node,pattern);
+                node->subs.insert(pattern,suffix);
                 Type* t = new Type(primitive->GetBasicType());
                 t->ArrayLevel(arrayLevel);
+                t->PointerLevel(pointerLevel);
                 t->Pinned(pinned);
+                if( modopt )
+                    t->Modopt(dynamic_cast<Type*>(modopt->thing));
                 suffix->thing = t;
             }
             return suffix;
         }else
         {
+            // pattern may be empty here; we need a Type in any case
             DataContainer* dc = dynamic_cast<DataContainer*>(node->thing);
             Q_ASSERT(dc);
-            Node* suffix = node->subs.value(array);
+            Node* suffix = node->subs.value(pattern);
             if( suffix == 0 )
             {
-                suffix = new Node(node,array);
-                node->subs.insert(array,suffix);
+                suffix = new Node(node,pattern);
+                node->subs.insert(pattern,suffix);
                 Type* t = new Type(dc);
                 t->ArrayLevel(arrayLevel);
-                if( arrayLevel )
+                if( arrayLevel || pointerLevel )
                     t->ShowType(); // otherwise refs in stelem or newarr only show record not array level
                     // see Record3.obx and Gen4Tests T3VariableDeclarations.obn
+                t->PointerLevel(pointerLevel);
                 t->Pinned(pinned);
+                if( modopt )
+                    t->Modopt(dynamic_cast<Type*>(modopt->thing));
                 suffix->thing = t;
             }
             return suffix;
@@ -1261,6 +1249,7 @@ void PelibGen::addMethod(const IlMethod& m)
     {
     case IlEmitter::Static:
     case IlEmitter::Primary:
+    default:
         hint = SignatureParser::Static;
         break;
     case IlEmitter::Pinvoke:
@@ -1283,7 +1272,7 @@ void PelibGen::addMethod(const IlMethod& m)
     mm->HasEntryPoint(m.d_methodKind == IlEmitter::Primary );
 
     if( m.d_methodKind == IlEmitter::Pinvoke )
-        mm->SetPInvoke(m.d_library.constData(), Method::Stdcall, m.d_origName.constData() );
+        mm->SetPInvoke(m.d_library.constData(), Method::Cdecl, m.d_origName.constData() );
 
     Qualifiers q = Qualifiers::Managed;
     switch( m.d_methodKind )
@@ -1529,6 +1518,17 @@ void PelibGen::addField(const QByteArray& fieldName, const QByteArray& typeRef, 
     // this features is acutally missing in the ECMA-335 issue 3 to 5, but not in Lidins book, see p. 142 there.
     SignatureParser::Node* type = d_imp->find(SignatureParser::TypeRef,typeRef);
     Q_ASSERT( type );
+#if 0
+    if( d_imp->moduleName == "Test2" )
+    {
+                // TEST
+                qDebug() << "***" << type->path().join(' ');
+                QList<Resource*> path = type->thingsPath();
+                foreach( Resource* r, path )
+                    qDebug() << dump(r);
+    }
+#endif
+
     SignatureParser::Node* field = SignatureParser::findOrCreateField(d_imp->level.back(),unescape(fieldName), type, hint);
     if( explicitOffset >= 0 && field->thing )
         static_cast<Field*>(field->thing)->ExplicitOffset(explicitOffset);
