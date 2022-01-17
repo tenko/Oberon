@@ -414,6 +414,14 @@ void IlEmitter::conv_(IlEmitter::ToType t, bool withOverflow, bool withUnsignedO
         else
             d_body.append(IlOperation(IL_conv_u8));
         break;
+    case ToI:
+        if( withUnsignedOverflow )
+            d_body.append(IlOperation(IL_conv_ovf_i_un));
+        else if( withOverflow )
+            d_body.append(IlOperation(IL_conv_ovf_i));
+        else
+            d_body.append(IlOperation(IL_conv_i));
+        break;
     default:
         Q_ASSERT(false);
         break;
@@ -1006,7 +1014,10 @@ void IlEmitter::delta(int d)
     int s = d_stackDepth;
     s += d;
    // TODO Q_ASSERT( s >= 0 );
-    d_stackDepth = s;
+    if( s >= 0 )
+        d_stackDepth = s;
+    else
+        d_stackDepth = 0;
     if( d_stackDepth > d_maxStackDepth )
         d_maxStackDepth = d_stackDepth;
 }
