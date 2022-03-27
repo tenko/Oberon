@@ -1,5 +1,5 @@
 /*
-* Copyright 2020 Rochus Keller <mailto:me@rochus-keller.ch>
+* Copyright 2021 Rochus Keller <mailto:me@rochus-keller.ch>
 *
 * This file is part of the OBX parser/code model library.
 *
@@ -587,6 +587,11 @@ Ref<Type> Parser::arrayType(Scope* scope, Named* id, Type* binding)
         next();
         arr->d_loc = d_cur.toRowCol();
         /*arr->d_flag =*/ systemFlag(); // backward compatiblity
+        if( d_la == Tok_VAR )
+        {
+            next();
+            arr->d_vla = true;
+        }
         if( d_la != Tok_OF )
         {
             dims = lengthList();
@@ -596,6 +601,11 @@ Ref<Type> Parser::arrayType(Scope* scope, Named* id, Type* binding)
     {
         MATCH( Tok_Lbrack, tr("expecting '['") );
         arr->d_loc = d_cur.toRowCol();
+        if( d_la == Tok_VAR )
+        {
+            next();
+            arr->d_vla = true;
+        }
         if( d_la != Tok_Rbrack )
         {
             dims = lengthList();
@@ -615,6 +625,7 @@ Ref<Type> Parser::arrayType(Scope* scope, Named* id, Type* binding)
             Ref<Array> cur = new Array();
             cur->d_type = t;
             cur->d_lenExpr = dims[i];
+            cur->d_vla = last->d_vla;
             last->d_type = cur.data();
             last = cur;
         }
@@ -979,7 +990,10 @@ Ref<Expression> Parser::designator()
         Ref<UnExpr> u = selector();
         if( !u.isNull() )
         {
-            u->d_sub = e;
+            Ref<UnExpr> first = u;
+            while( !first->d_sub.isNull() )
+                first = cast<UnExpr*>(first->d_sub.data());
+            first->d_sub = e;
             e = u.data();
         }
     }
@@ -1004,12 +1018,19 @@ Ref<UnExpr> Parser::selector()
     case Tok_Lbrack:
         {
             next();
-            Ref<ArgExpr> a = new ArgExpr();
-            a->d_loc = d_cur.toRowCol();
-            a->d_args = expList();
-            a->d_op = UnExpr::IDX;
+            ExpList l = expList();
+            Ref<ArgExpr> a, prev;
+            foreach( const Ref<Expression>& e, l )
+            {
+                a = new ArgExpr();
+                a->d_loc = d_cur.toRowCol();
+                a->d_args.append(e);
+                a->d_op = UnExpr::IDX;
+                a->d_sub = prev.data();
+                prev = a;
+            }
             MATCH( Tok_Rbrack, tr("expecting ']' to terminate expression list in index") );
-            return a.data();
+            return a.data(); // a can be one or a chain of ArgExpr with one arg each with a being the last in the list
         }
         break;
     case Tok_Hat:

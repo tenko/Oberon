@@ -35,7 +35,7 @@ const char* Thing::s_tagName[] =
 
 const char* BaseType::s_typeName[] =
 {
-    "NONE", "ANY", "VOID", "NIL", "#BYTEARRAY", "#STRING", "#WSTRING", "BOOLEAN", "CHAR", "WCHAR", "BYTE",
+    "NONE", "ANY", "ANYREC", "VOID", "NIL", "#BYTEARRAY", "#STRING", "#WSTRING", "BOOLEAN", "CHAR", "WCHAR", "BYTE",
     "SHORTINT", "INTEGER", "LONGINT", "REAL", "LONGREAL", "SET", "#ENUMINT"
 };
 
@@ -117,7 +117,11 @@ struct ObxAstPrinter : public AstVisitor
     {
         if( namedType(t) )
             return;
-        out << "ARRAY " << t->d_len << " ";
+        out << "ARRAY ";
+        if( t->d_vla )
+            out << "var ";
+        else
+            out << t->d_len << " ";
         if( t->d_type.isNull() )
             out << "? ";
         else
@@ -623,6 +627,12 @@ bool ProcType::isBuiltIn() const
     return d_decl && d_decl->getTag() == Thing::T_BuiltIn;
 }
 
+void ProcType::addNonLocal(Named* n)
+{
+    if( !d_nonLocals.contains(n) )
+        d_nonLocals.append(n);
+}
+
 ProcType*ArgExpr::getProcType() const
 {
     Q_ASSERT( !d_sub.isNull() && !d_sub->d_type.isNull() && d_sub->d_type->derefed()->getTag() == Thing::T_ProcType );
@@ -860,6 +870,7 @@ quint8 IdentLeaf::visibilityFor(Module*) const
     default:
         Q_ASSERT(false);
     }
+    return Named::NotApplicable;
 }
 
 #ifdef _DEBUG
@@ -1266,7 +1277,17 @@ QList<Expression*> Expression::getSubList() const
 
 QVariant BaseType::maxVal() const
 {
-    switch( d_baseType )
+    return maxVal(d_baseType);
+}
+
+QVariant BaseType::minVal() const
+{
+    return minVal(d_baseType);
+}
+
+QVariant BaseType::maxVal(quint8 baseType)
+{
+    switch( baseType )
     {
     case BOOLEAN:
         return true;
@@ -1292,9 +1313,9 @@ QVariant BaseType::maxVal() const
     return QVariant();
 }
 
-QVariant BaseType::minVal() const
+QVariant BaseType::minVal(quint8 baseType)
 {
-    switch( d_baseType )
+    switch( baseType )
     {
     case BOOLEAN:
         return false;
@@ -1458,8 +1479,10 @@ Record*Type::toRecord(bool* isPtr) const
 Module*Type::declaredIn()
 {
     Named* n = findDecl(true);
-    Q_ASSERT(n);
-    return n->getModule();
+    if(n)
+        return n->getModule();
+    else
+        return 0; // should not happen
 }
 
 bool Literal::isWide(const QString& str)

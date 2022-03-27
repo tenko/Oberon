@@ -186,7 +186,7 @@ namespace Obx
 
     struct Type : public Thing
     {
-        enum { NONE, ANY, CVOID, NIL, BYTEARRAY, STRING, WSTRING, BOOLEAN, CHAR, WCHAR, BYTE, SHORTINT,
+        enum { NONE, ANY, ANYREC, CVOID, NIL, BYTEARRAY, STRING, WSTRING, BOOLEAN, CHAR, WCHAR, BYTE, SHORTINT,
                INTEGER, LONGINT, REAL, LONGREAL, SET, ENUMINT }; // BaseType
 
         Named* d_decl; // a reference to the corresponding declaration (type, var, etc.) or null if type is anonymous
@@ -201,12 +201,11 @@ namespace Obx
         uint d_metaActual : 1;  // true if this is an actual type replacing ANY in instantiation
         uint d_usedByVal : 1; // true if record is used by value as a formal parameter, return, field or variable
         uint d_usedByRef : 1; // true if record is used as pointer base type in a formal param, return, field or variable or VAR param
-
-        // Ref<Expression> d_flag; // optional system flag, no longer used, see Scope::d_sysAttrs
+        uint d_vla : 1;       // true if array is variable length
 
         Type():d_decl(0),d_binding(0),d_baseType(0),d_union(false),
             d_typeBound(false),d_varargs(false),d_byValue(false),d_selfRef(false),d_metaActual(false),
-            d_usedByVal(false), d_usedByRef(false) {}
+            d_usedByVal(false), d_usedByRef(false), d_vla(false) {}
         typedef QList< Ref<Type> > List;
         virtual bool isStructured(bool withPtrAndProcType = false) const { return false; }
         virtual bool isPointer() const { return false; }
@@ -238,6 +237,8 @@ namespace Obx
         BaseType(quint8 t = NIL ) { d_baseType = t; }
         QVariant maxVal() const;
         QVariant minVal() const;
+        static QVariant maxVal(quint8 baseType);
+        static QVariant minVal(quint8 baseType);
         quint32 getByteSize() const;
         int getTag() const { return T_BaseType; }
         void accept(AstVisitor* v) { v->visit(this); }
@@ -311,6 +312,8 @@ namespace Obx
         Ref<Type> d_return;
         Formals d_formals;
 
+        QList<Named*> d_nonLocals; // if this is a nested procedure these are the required locals/params of the outer procs
+
         ProcType(const Type::List& f, Type* r = 0);
         ProcType(const Type::List& f, const Vars& var, Type* r = 0);
         ProcType(){}
@@ -322,6 +325,7 @@ namespace Obx
         bool isBuiltIn() const;
         QString pretty() const { return d_typeBound ? "PROC(^)" : "PROC"; }
         quint32 getByteSize() const { return Pointer::s_pointerByteSize; }
+        void addNonLocal(Named*);
     };
 
     struct QualiType : public Type
@@ -359,11 +363,12 @@ namespace Obx
         uint d_hasErrors : 1;
         uint d_liveTo : 20;
         uint d_noBody : 1; // Procedure
+        uint d_used : 1; // Procedure: called or assigned
 
         Named(const QByteArray& n = QByteArray(), Type* t = 0, Scope* s = 0):d_scope(s),d_type(t),d_name(n),
             d_visibility(NotApplicable),d_synthetic(false),d_liveFrom(0),d_liveTo(0),
             d_upvalSource(0),d_upvalIntermediate(0),d_upvalSink(0),
-            d_hasErrors(0),d_noBody(0) {}
+            d_hasErrors(0),d_noBody(0),d_used(0) {}
         virtual QByteArray getName() const { return d_name; }
         bool isNamed() const { return true; }
         virtual bool isVarParam() const { return false; }
@@ -505,6 +510,7 @@ namespace Obx
         Procedure* d_super; // the procedure of the super class this procedure overrides, or zero
         QList<Procedure*> d_subs; // the procedures of the subclasses which override this procedure
         // Ref<Expression> d_imp; // the number or string after PROC+, no longer supported, see d_sysAttrs
+        QSet<Procedure*> d_calling; // the non-builtin procedures directly called in the body
         Procedure():d_receiverRec(0),d_super(0) {}
         void accept(AstVisitor* v) { v->visit(this); }
         int getTag() const { return T_Procedure; }

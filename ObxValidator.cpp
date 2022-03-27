@@ -25,6 +25,44 @@ using namespace Ob;
 
 struct ValidatorImp : public AstVisitor
 {
+    struct VlaChecker : public AstVisitor
+    {
+        Scope* scope;
+        Errors* err;
+        VlaChecker(Scope* s, Errors* e):scope(s),err(e) {}
+        void visit( SetExpr* me)
+        {
+            foreach( const Ref<Expression>& e, me->d_parts )
+                e->accept(this);
+        }
+        void visit( IdentLeaf* me)
+        {
+            Named* id = me->getIdent();
+            if( id && id->d_scope == scope && id->getTag() == Thing::T_LocalVar )
+                err->error(Errors::Semantics,Loc(me->d_loc,scope->getModule()->d_file),
+                           Validator::tr("variable array length cannot depend on local variable"));
+        }
+        void visit( UnExpr* me)
+        {
+            me->d_sub->accept(this);
+        }
+        void visit( IdentSel* me)
+        {
+            me->d_sub->accept(this);
+        }
+        void visit( ArgExpr* me)
+        {
+            me->d_sub->accept(this);
+            foreach( const Ref<Expression>& e, me->d_args )
+                e->accept(this);
+        }
+        void visit( BinExpr* me)
+        {
+            me->d_lhs->accept(this);
+            me->d_rhs->accept(this);
+        }
+    };
+
     Errors* err;
     Module* mod;
     Instantiator* insts;
@@ -39,6 +77,8 @@ struct ValidatorImp : public AstVisitor
     QList<Level> levels;
     Type* curTypeDecl;
     Statement* prevStat;
+    QSet<Const*> constTrace;
+    QList<Expression*> deferProcCheck;
     bool returnValueFound;
 
     ValidatorImp():err(0),mod(0),curTypeDecl(0),prevStat(0),returnValueFound(false) {}
@@ -105,6 +145,38 @@ struct ValidatorImp : public AstVisitor
         }
     }
 
+    void collectNonLocals( Procedure* caller, QSet<Procedure*>& visited, int level = 0 )
+    {
+        //qDebug() << QByteArray(level*4,' ').constData() << caller->d_name << visited.contains(caller);
+        if( visited.contains(caller) )
+            return;
+        visited.insert(caller);
+        ProcType* callerPt = caller->getProcType();
+        foreach( Procedure* called, caller->d_calling )
+        {
+            if( !called->d_upvalIntermediate && !called->d_upvalSink )
+                continue;
+            collectNonLocals(called,visited, level+1);
+            ProcType* calledPt = called->getProcType();
+            foreach( Named* nl, calledPt->d_nonLocals )
+            {
+                if( nl->d_scope != caller )
+                {
+                    caller->d_upvalIntermediate = true;
+                    callerPt->addNonLocal(nl);
+                }
+            }
+        }
+        if( callerPt->d_typeBound && caller->d_upvalIntermediate )
+            error( callerPt->d_loc, Validator::tr("type-bound procedures cannot be non-local access intermediates") );
+#if 0
+        qDebug() << "****" << caller->d_name << caller->getProcType()->d_nonLocals.size() <<
+                    caller->d_upvalSource << caller->d_upvalIntermediate << caller->d_upvalSink;
+        foreach(Named* nl, caller->getProcType()->d_nonLocals )
+            qDebug() << "    " << nl->d_name;
+#endif
+    }
+
     void visit( Module* me)
     {
         if( me->d_visited )
@@ -141,7 +213,25 @@ struct ValidatorImp : public AstVisitor
         levels.push_back(me);
         // imports are supposed to be already resolved at this place
         visitScope(me);
+        foreach( const Ref<Named>& n, me->d_order )
+        {
+            if( n->getTag() == Thing::T_Procedure && n->d_upvalSource )
+            {
+                QSet<Procedure*> visited;
+                collectNonLocals( cast<Procedure*>(n.data()), visited );
+            }
+        }
         visitStats( me->d_body );
+
+        foreach( Expression* e, deferProcCheck )
+        {
+            Named* p = e->getIdent();
+            Q_ASSERT( p && p->getTag() == Thing::T_Procedure );
+            if( p->d_upvalIntermediate || p->d_upvalSink )
+                error( e->d_loc, Validator::tr("this procedure depends on the environment and cannot be assigned"));
+        }
+        deferProcCheck.clear();
+
         levels.pop_back();
     }
 
@@ -288,13 +378,30 @@ struct ValidatorImp : public AstVisitor
         {
             if( n->d_scope != levels.back().scope )
             {
+                Type* td = derefed(n->d_type.data());
+                if( td->d_unsafe )
+                    error( e->d_loc, Validator::tr("non-local access to unsafe types not supported") );
+                ProcType* pt;
                 n->d_scope->d_upvalSource = true;
                 int i = levels.size() - 2;
                 while( i > 0 && levels[i].scope != n->d_scope )
-                    levels[i--].scope->d_upvalIntermediate = true;
+                {
+                    levels[i].scope->d_upvalIntermediate = true;
+                    pt = cast<ProcType*>(levels[i].scope->d_type.data());
+                    pt->addNonLocal(n);
+                    if( pt->d_typeBound )
+                        error( e->d_loc, Validator::tr("type-bound procedures cannot be non-local access intermediates") );
+                    i--;
+                }
                 levels.back().scope->d_upvalSink = true;
+                pt = cast<ProcType*>(levels.back().scope->d_type.data());
+                pt->addNonLocal(n);
+                if( pt->d_typeBound )
+                    error( e->d_loc, Validator::tr("type-bound procedures cannot access non-local variables and parameters") );
                 n->d_upvalSource = true;
-                error( e->d_loc, Validator::tr("cannot access local variables and parameters of outer procedures") );
+                // no longer true:
+                //error( e->d_loc, Validator::tr("cannot access local variables and parameters of outer procedures") );
+                //warning( e->d_loc, Validator::tr("non-local access") );
             }
         }
     }
@@ -309,11 +416,21 @@ struct ValidatorImp : public AstVisitor
             error( me->d_loc, Validator::tr("cannot resolve identifier '%1'").arg(me->d_name.constData()) );
         }else
         {
-            if( me->d_ident->getTag() == Thing::T_Import )
+            switch( me->d_ident->getTag() )
             {
-                Import* imp = cast<Import*>(me->d_ident.data());
-                if( !imp->d_metaActuals.isEmpty() && !imp->d_visited )
-                    imp->accept(this);
+            case Thing::T_Import:
+                {
+                    Import* imp = cast<Import*>(me->d_ident.data());
+                    if( !imp->d_metaActuals.isEmpty() && !imp->d_visited )
+                        imp->accept(this);
+                }
+                break;
+            case Thing::T_Const:
+                {
+                    Const* c = cast<Const*>(me->d_ident.data());
+                    if( !c->d_visited )
+                        c->accept(this);
+                }
             }
             checkNonLocalAccess(me->d_ident.data(),me);
             //if( me->d_ident->getTag() == Thing::T_Import )
@@ -577,7 +694,7 @@ struct ValidatorImp : public AstVisitor
             if( args->d_args.size() == 1 )
             {
                 Type* td = derefed(args->d_args.first()->d_type.data());
-                if( !td->isInteger() )
+                if( td == 0 || !td->isInteger() )
                     error( args->d_args[0]->d_loc, Validator::tr("expecting integer argument"));
             }else
                 error( args->d_loc, Validator::tr("expecting one argument"));
@@ -764,8 +881,9 @@ struct ValidatorImp : public AstVisitor
         case BuiltIn::DEFAULT:
             if( args->d_args.size() == 1 )
             {
-                Type* lhs = derefed(args->d_args.first()->d_type.data());
-                // TODO: check for quali to type
+                Named* n = args->d_args.first()->getIdent();
+                if( n == 0 || ( n->getTag() != Thing::T_NamedType && n->getTag() != Thing::T_GenericName ) )
+                    error( args->d_args.first()->d_loc, Validator::tr("expecting a type name") );
             }else
                 error( args->d_loc, Validator::tr("expecting one argument"));
             break;
@@ -854,7 +972,7 @@ struct ValidatorImp : public AstVisitor
             if( args->d_args.size() == 2 )
             {
                 Named* n = args->d_args.first()->getIdent();
-                if( n == 0 || n->getTag() != Thing::T_NamedType )
+                if( n == 0 || ( n->getTag() != Thing::T_NamedType && n->getTag() != Thing::T_GenericName ) )
                 {
                     error( args->d_args.first()->d_loc, Validator::tr("expecting a type name") );
                     break;
@@ -1129,7 +1247,7 @@ struct ValidatorImp : public AstVisitor
 
         checkValidRhs(actual.data());
 
-        if( af && af->d_lenExpr.isNull() )
+        if( af && ( af->d_lenExpr.isNull() || af->d_vla || ta->d_vla ) )
         {
             // If Tf is an open array, then a must be array compatible with f
             if( !arrayCompatible( af, actual->d_type.data(), actual->d_loc ) )
@@ -1142,7 +1260,7 @@ struct ValidatorImp : public AstVisitor
             // Otherwise Ta must be parameter compatible to f
             if( !paramCompatible( formal, actual.data() ) )
             {
-                // paramCompatible( formal, actual.data() ); // TEST
+                //paramCompatible( formal, actual.data() ); // TEST
                 error( actual->d_loc,
                    Validator::tr("actual parameter type %1 not compatible with formal type %2%3")
                    .arg(actual->d_type->pretty()).arg(var).arg(formal->d_type->pretty()));
@@ -1178,6 +1296,29 @@ struct ValidatorImp : public AstVisitor
                 addAddrOf(me->d_args[i]);
             }else if( !( t->d_unsafe || !t->isStructured(true) ) )
                 error( a->d_loc, Validator::tr("actual parameter type not supported in variadic procedure call"));
+        }
+        Named* n = me->d_sub->getIdent();
+        if( n && n->getTag() == Thing::T_Procedure && levels.back().scope->getTag() == Thing::T_Procedure )
+        {
+#if 0
+            // we cannot do it here because not all procedures have been visited yet
+            ProcType* curProc = cast<ProcType*>(levels.back().scope->d_type.data());
+            foreach( Named* nl, p->d_nonLocals )
+            {
+                if( false ) // TODO nl->d_scope != levels.back().scope )
+                {
+                    levels.back().scope->d_upvalIntermediate = true;
+                    curProc->addNonLocal(nl);
+                }
+            }
+#else
+            Procedure* curProc = cast<Procedure*>(levels.back().scope);
+            Procedure* calledProc = cast<Procedure*>(n);
+            curProc->d_calling.insert(calledProc);
+#endif
+        }else
+        {
+            Q_ASSERT(p->d_nonLocals.isEmpty());
         }
     }
 
@@ -1381,6 +1522,8 @@ struct ValidatorImp : public AstVisitor
                         me->d_type = calcBuiltInReturnType( cast<BuiltIn*>(p->d_decl), me->d_args );
                 }else
                 {
+                    if( p->d_decl && p->d_decl->getTag() == Thing::T_Procedure )
+                        p->d_decl->d_used = true;
                     me->d_type = p->d_return.data();
                     if( me->d_type.isNull() )
                         me->d_type = bt.d_noType;
@@ -1429,7 +1572,7 @@ struct ValidatorImp : public AstVisitor
             }
             if( subType == 0 || subType->getTag() != Thing::T_Array )
             {
-                error( me->d_loc, Validator::tr("index selector only available for arrays") );
+                error( me->d_loc, Validator::tr("no array dimension corresponds to this index selector") );
                 return;
             }
 
@@ -1448,6 +1591,7 @@ struct ValidatorImp : public AstVisitor
 
             if( me->d_args.size() > 1 )
             {
+                Q_ASSERT(false); // no longer used since Parser::selector already makes a chain of ArgExpr
                 // Modify AST so that each IDX only has one dimension and me is the last element in the chain
                 Ref<ArgExpr> prev;
                 for( int i = 0; i < me->d_args.size() - 1; i++ )
@@ -1552,8 +1696,12 @@ struct ValidatorImp : public AstVisitor
             break;
         case UnExpr::NEG:
             if( isNumeric(prevT) || prevT == bt.d_setType )
-                me->d_type = prevT;
-            else
+            {
+                if( prevT->getBaseType() == Type::BYTE )
+                    me->d_type = bt.d_shortType;
+                else
+                    me->d_type = prevT;
+            }else
                 error( me->d_loc, Validator::tr("sign inversion only applicable to numeric or set types") );
             break;
         case UnExpr::NOT:
@@ -1833,6 +1981,7 @@ struct ValidatorImp : public AstVisitor
         {
             me->d_to->accept(this);
             Type* t = derefed(me->d_to.data());
+            checkNoVla(t, me->d_loc);
             if( me->d_unsafe )
             {
                 if( t && !( ( t->isStructured() && t->d_unsafe ) || t->getBaseType() == Type::CVOID ) )
@@ -1851,28 +2000,29 @@ struct ValidatorImp : public AstVisitor
             return;
         me->d_visited = true;
 
-#if 0
-        if( !me->d_flag.isNull() )
-            me->d_flag->accept(this);
-#endif
-
         if( !me->d_lenExpr.isNull() )
         {
             me->d_lenExpr->accept(this);
-            if( !isInteger(me->d_lenExpr->d_type.data() ) )
+            if( !isInteger(derefed(me->d_lenExpr->d_type.data()) ) )
+            {
                 error( me->d_lenExpr->d_loc, Validator::tr("expression doesn't evaluate to an integer") );
-            else
+            }else if( me->d_vla )
+            {
+                // if me->d_lenExpr references a local var in this scope because it is unset at this time
+                if( !levels.isEmpty() )
+                {
+                    VlaChecker checker(levels.back().scope,err);
+                    me->d_lenExpr->accept(&checker);
+                }else
+                    error(me->d_lenExpr->d_loc,Validator::tr("variable length array types can only be declared on procedure level") );
+                me->d_len = 0;
+            }else
             {
                 Scope* scope = levels.back().scope;
-#if 0 // VLA support not ready yet
-                Evaluator::Result res = Evaluator::eval(me->d_lenExpr.data(), scope, scope != mod,err);
-#else
                 Evaluator::Result res = Evaluator::eval(me->d_lenExpr.data(), scope, false,err);
-#endif
                 if( res.d_dyn )
                 {
                     me->d_len = 0;
-
                 }else
                 {
                     bool ok;
@@ -1888,6 +2038,8 @@ struct ValidatorImp : public AstVisitor
         }
         if( me->d_type )
             me->d_type->accept(this);
+        if( !me->d_vla )
+            checkNoVla(me->d_type.data(), me->d_type->d_loc);
         checkNoAnyRecType(me->d_type.data());
         checkNoBooleanTypeInUnsafe(me->d_type.data(),me->d_unsafe, me->d_loc);
         checkSelfRef(me);
@@ -2038,6 +2190,7 @@ struct ValidatorImp : public AstVisitor
             f->accept(this);
 
             checkSelfRef(f->d_type.data());
+            checkNoVla(f->d_type.data(),f->d_loc);
 #ifdef OBX_BBOX
             if( me->d_unsafe )
             {
@@ -2098,6 +2251,7 @@ struct ValidatorImp : public AstVisitor
             me->d_return->accept(this);
             if( !me->d_return->hasByteSize() )
                 error(me->d_return->d_loc, Validator::tr("this type cannot be used here") );
+            checkNoVla(me->d_return.data(),me->d_return->d_loc);
             checkNoBooleanTypeInUnsafe(me->d_return.data(), me->d_unsafe, me->d_loc);
 
             if( me->d_unsafe )
@@ -2118,6 +2272,7 @@ struct ValidatorImp : public AstVisitor
         {
             p->accept(this);
             checkRecordUse(p->d_type.data(), p->d_var);
+            checkNoVla(p->d_type.data(),p->d_loc);
         }
     }
 
@@ -2128,6 +2283,7 @@ struct ValidatorImp : public AstVisitor
         curTypeDecl = me->d_type.data();
         if( me->d_type )
             me->d_type->accept(this);
+        checkNoVla(me->d_type.data(), me->d_loc);
         checkNoAnyRecType(me->d_type.data());
         checkNoBooleanTypeInUnsafe(me->d_type.data(), me->d_unsafe, me->d_loc);
         curTypeDecl = 0;
@@ -2135,8 +2291,14 @@ struct ValidatorImp : public AstVisitor
 
     void visit( Const* me )
     {
-        if( me->d_constExpr.isNull() )
+        if( me->d_constExpr.isNull() || me->d_visited )
             return;
+        if( constTrace.contains(me) )
+        {
+            error(me->d_loc, Validator::tr("const depends on itself"));
+            return;
+        }
+        constTrace.insert(me);
         me->d_constExpr->accept(this);
         me->d_type = me->d_constExpr->d_type.data();
         Evaluator::Result res = Evaluator::eval(me->d_constExpr.data(), mod, false, err);
@@ -2144,11 +2306,61 @@ struct ValidatorImp : public AstVisitor
         me->d_vtype = res.d_vtype;
         me->d_wide = res.d_wide;
         me->d_strLen = res.d_strLen;
+        me->d_visited = true;
+        constTrace.remove(me);
+        Type* td = derefed(me->d_type.data());
+        if( td->isInteger() )
+        {
+#if 0
+            bool overflow = false;
+            qint64 v = me->d_val.toLongLong();
+            switch(td->getBaseType())
+            {
+            case Type::BYTE:
+                if( v > 255 || v < 0 )
+                    overflow = true;
+                break;
+            case Type::SHORTINT:
+                if( v > std::numeric_limits<qint16>::max() || v < std::numeric_limits<qint16>::min() )
+                    overflow = true;
+                break;
+            case Type::INTEGER:
+            case Type::SET:
+            case Type::ENUMINT:
+                if( v > std::numeric_limits<qint32>::max() || v < std::numeric_limits<qint32>::min() )
+                    overflow = true;
+                break;
+            }
+            if( overflow )
+                warning(me->d_constExpr->d_loc, Validator::tr("value is out of range") );
+#else
+            // if the type according to expression rules is not wide enough to accomodate the number, widen it
+            qint64 v = me->d_val.toLongLong();
+            Type* newType = td;
+            if( newType->getBaseType() == Type::BYTE &&
+                    ( v < 0 || v > bt.d_byteType->maxVal().toInt() ) )
+                newType = bt.d_shortType;
+            if( newType->getBaseType() == Type::SHORTINT &&
+                    ( v < bt.d_shortType->minVal().toInt() || v > bt.d_shortType->maxVal().toInt() ) )
+                newType = bt.d_intType;
+            if( newType->getBaseType() == Type::INTEGER &&
+                    ( v < bt.d_intType->minVal().toInt() || v > bt.d_intType->maxVal().toInt() ) )
+                newType = bt.d_longType;
+            if( newType != td )
+            {
+                warning(me->d_constExpr->d_loc, Validator::tr("widened type from %1 to %2")
+                        .arg(BaseType::s_typeName[td->getBaseType()])
+                        .arg(BaseType::s_typeName[newType->getBaseType()]));
+                me->d_type = newType;
+            }
+#endif
+        }
     }
 
     void visit( Field* me )
     {
         checkVarType(me);
+        checkNoVla(me->d_type.data(),me->d_loc);
     }
 
     void visit( Variable* me )
@@ -2156,6 +2368,8 @@ struct ValidatorImp : public AstVisitor
         checkVarType(me);
         if( mod->d_externC )
             error(me->d_loc, Validator::tr("variables not supported in external library modules") );
+        else
+            checkNoVla(me->d_type.data(),me->d_loc);
     }
 
     void visit( LocalVar* me )
@@ -2178,7 +2392,7 @@ struct ValidatorImp : public AstVisitor
             error(me->d_loc, Validator::tr("VAR not supported with unsafe structured types") );
         if( me->d_unsafe )
             checkNoArrayByVal(me->d_type.data(),me->d_loc);
-
+        checkNoVla(me->d_type.data(),me->d_loc);
 #if 0 // TEST
         checkUnsafePointer(me->d_type.data(),false,me->d_loc);
 #endif
@@ -2398,17 +2612,15 @@ struct ValidatorImp : public AstVisitor
             {
                 // Both Oberon-2 and 07 support this
                 // TODO: check wchar vs char compat
-                if( a->d_len && lit->d_vtype == Literal::String && lit->d_strLen > a->d_len )
+                if( !a->d_lenExpr.isNull() && !a->d_vla && lit->d_vtype == Literal::String && lit->d_strLen > a->d_len )
                     error( me->d_rhs->d_loc, Validator::tr("string is too long to assign to given character array"));
-                if( a->d_len && lit->d_vtype == Literal::Char && 1 > a->d_len )
+                if( !a->d_lenExpr.isNull() && !a->d_vla && lit->d_vtype == Literal::Char && 1 > a->d_len )
                     error( me->d_rhs->d_loc, Validator::tr("the character array is too small for the character"));
             }else if( at && at == bt.d_byteType )
             {
-                if( a->d_len && lit->d_vtype == Literal::Bytes && lit->d_strLen > a->d_len )
+                if( !a->d_lenExpr.isNull() && !a->d_vla && lit->d_vtype == Literal::Bytes && lit->d_strLen > a->d_len )
                     error( me->d_rhs->d_loc, Validator::tr("literal is too long to assign to given array"));
             }
-            // TODO: runtime checks for var length arrays
-
         }
 
         checkValidRhs(me->d_rhs.data());
@@ -2436,10 +2648,7 @@ struct ValidatorImp : public AstVisitor
             const int tag = n ? n->getTag() : 0;
             if( tag == Thing::T_Procedure )
             {
-                Procedure* p = cast<Procedure*>(n);
-                if( p->d_upvalIntermediate || p->d_upvalSink ) // only relevant if non-local access enabled
-                    error( rhs->d_loc, Validator::tr("this procedure depends on the environment and cannot be assigned"));
-                else if( rhs->d_type->d_typeBound )
+                if( rhs->d_type->d_typeBound )
                 {
                     // rhs is a type bound procedure
                     const int etag = rhs->getTag();
@@ -2454,7 +2663,12 @@ struct ValidatorImp : public AstVisitor
                         if( sel->d_sub->getUnOp() != UnExpr::DEREF )
                             error( rhs->d_loc, Validator::tr("only a type-bound procedure designated by a pointer can be assigned"));
                     }
+                }else
+                {
+                    deferProcCheck.append(rhs);
+                    n->d_used = true;
                 }
+
             }else if( tag == Thing::T_BuiltIn )
                 error( rhs->d_loc, Validator::tr("a predeclared procedure cannot be assigned"));
         }
@@ -2786,6 +3000,7 @@ struct ValidatorImp : public AstVisitor
         if( me->d_type )
         {
             me->d_type->accept(this);
+            me->d_visited = true;
             if( !me->d_type->hasByteSize() )
                 error(me->d_type->d_loc, Validator::tr("this type cannot be used here") );
             checkNoAnyRecType(me->d_type.data());
@@ -2818,6 +3033,13 @@ struct ValidatorImp : public AstVisitor
         }
 #endif
 #endif
+    }
+
+    inline void checkNoVla(Type* t, const RowCol& loc )
+    {
+        Type* td = derefed(t);
+        if( td && td->d_vla )
+            error(loc, Validator::tr("cannot use variable length arrays here") );
     }
 
     void visitStats( const StatSeq& ss )
@@ -3027,6 +3249,8 @@ struct ValidatorImp : public AstVisitor
         rhs = derefed(rhs);
         if( lhs == 0 || rhs == 0 )
             return false;
+        if( lhs->d_vla || rhs->d_vla )
+            return false;
         if( lhs == rhs && !isOpenArray(lhs) )
             return true;
         return false;
@@ -3045,7 +3269,6 @@ struct ValidatorImp : public AstVisitor
         if( lhs->d_unsafe != rhs->d_unsafe )
             return false;
 #endif
-
         const int lhstag = lhs->getTag();
         const int rhstag = rhs->getTag();
         if( lhstag == Thing::T_Array )
@@ -3086,8 +3309,8 @@ struct ValidatorImp : public AstVisitor
     {
         if( super == 0 || sub == 0 )
             return false;
-        if( super == sub )
-            return true; // same type
+        if( sameType(super,sub))
+            return true;
         bool superIsPointer = false;
         if( super->getTag() == Thing::T_Pointer )
         {
@@ -3102,8 +3325,8 @@ struct ValidatorImp : public AstVisitor
         }
         if( checkKind && subIsPointer != superIsPointer )
             return false;
-        if( super == sub )
-            return true; // same type
+        if( sameType(super,sub))
+            return true;
         if( super->getTag() == Thing::T_Record && sub->getTag() == Thing::T_Record )
         {
 #ifdef OBX_BBOX
@@ -3135,6 +3358,9 @@ struct ValidatorImp : public AstVisitor
             return true;
         lhsT = derefed(lhsT);
         rhsT = derefed(rhsT);
+        if( rhsT == 0 )
+            return false;
+        const int rtag = rhsT->getTag();
 
         // T~v~ is a BYTE type and T~e~ is a Latin-1 character type
         // Oberon 90: The type BYTE is compatible with CHAR (shortint is 16 bit here)
@@ -3148,8 +3374,19 @@ struct ValidatorImp : public AstVisitor
 #endif
 
         // T~e~ and T~v~ are numeric or character types and T~v~ _includes_ T~e~
-        if( isNumeric(lhsT) && isNumeric(rhsT) )
+        if( isNumeric(lhsT) && ( isNumeric(rhsT) || rtag == Thing::T_Enumeration ) )
         {
+            if( isInteger(lhsT) && rtag == Thing::T_Enumeration )
+            {
+                // automatically convert enumeration to number TODO: should we really do this?
+                Enumeration* en = cast<Enumeration*>(rhsT);
+                if( en->d_items.size() < 256 )
+                    rhsT = bt.d_byteType;
+                else if( en->d_items.size() < ( 0xffff >> 1 ) )
+                    rhsT = bt.d_shortType;
+                else
+                    rhsT = bt.d_intType;
+            }
             if( includes(lhsT,rhsT) )
                 return true;
             else
@@ -3171,7 +3408,6 @@ struct ValidatorImp : public AstVisitor
             return true;
 
         const int ltag = lhsT->getTag();
-        const int rtag = rhsT->getTag();
 
         // T~e~ and T~v~ are pointer types and T~e~ is a _type extension_ of T~v~
         // or the pointers have _equal_ base types
@@ -3233,8 +3469,13 @@ struct ValidatorImp : public AstVisitor
                 // Array := Array
                 Array* r = cast<Array*>(rhsT);
                 Type* rt = derefed(r->d_type.data());
-                if( r->d_lenExpr.isNull() && equalType( lt, rt ) && !l->d_unsafe && !r->d_unsafe )
-                    return true; // T~e~ is an open array and T~v~ is an array of _equal_ base type
+                if( equalType( lt, rt ) && !l->d_unsafe && !r->d_unsafe )
+                {
+                    if( r->d_lenExpr.isNull() )
+                        return true; // T~e~ is an open array and T~v~ is an array of _equal_ base type
+                    if( r->d_vla || l->d_vla )
+                        return true;
+                }
                 if( lt == bt.d_charType && rt == bt.d_charType )
                     return true;
                 if( lt == bt.d_wcharType && rt->isChar() )
@@ -3249,7 +3490,7 @@ struct ValidatorImp : public AstVisitor
                     return true;
 #endif
 
-                // TODO: open carrays cannot be rhs because len is unknown at runtime
+                // NOTE: open carrays cannot be rhs because len is unknown at runtime
             }else if( lt == bt.d_charType && ( rhsT == bt.d_stringType || rhsT == bt.d_charType ) )
                 // Array := string
                 return true;
@@ -3388,7 +3629,7 @@ struct ValidatorImp : public AstVisitor
         const int rtag = rhsT->getTag();
         Array* ra = rtag == Thing::T_Array ? cast<Array*>(rhsT) : 0 ;
 
-        if( la == 0 || !la->d_lenExpr.isNull() )
+        if( la == 0 || ( !la->d_lenExpr.isNull() && !la->d_vla) )
             return false; // Tf is not an open array
 
         // T~f~ is an open array, T~a~ is any array, and their element types are array compatible
