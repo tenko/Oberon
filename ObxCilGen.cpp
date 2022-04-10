@@ -23,6 +23,7 @@
 #include "ObxProject.h"
 #include "ObxIlEmitter.h"
 #include "ObxPelibGen.h"
+#include "ObxValidator.h"
 #include <MonoTools/MonoMdbGen.h>
 #include <QtDebug>
 #include <QFile>
@@ -2375,7 +2376,8 @@ struct ObxCilGenImp : public AstVisitor
             {
                 Q_ASSERT( ae->d_args.size() == 1 );
                 ae->d_args.first()->accept(this);
-                const int bt = ae->d_args.first()->d_type.isNull() ? 0 : ae->d_args.first()->d_type->getBaseType();
+                Type* td = derefed(ae->d_args.first()->d_type.data());
+                const int bt = td == 0 ? 0 : td->getBaseType();
                 if( bt != Type::REAL && bt != Type::LONGREAL )
                 {
                     // always double on stack; Mono 5 and 6 sometimes result in NaN if conv.r4
@@ -2387,9 +2389,15 @@ struct ObxCilGenImp : public AstVisitor
             }
             break;
         case BuiltIn::ODD:
-            Q_ASSERT( ae->d_args.size() == 1 );
-            ae->d_args.first()->accept(this);
-            line(ae->d_loc).call_("bool [OBX.Runtime]OBX.Runtime::ODD(int32)", 1, true );
+            {
+                Q_ASSERT( ae->d_args.size() == 1 );
+                ae->d_args.first()->accept(this);
+                Type* td = derefed(ae->d_args.first()->d_type.data());
+                if( td && td->getBaseType() == Type::LONGINT )
+                    line(ae->d_loc).call_("bool [OBX.Runtime]OBX.Runtime::ODD(int64)", 1, true );
+                else
+                    line(ae->d_loc).call_("bool [OBX.Runtime]OBX.Runtime::ODD(int32)", 1, true );
+            }
             break;
         case BuiltIn::ABS:
             {
@@ -2421,6 +2429,7 @@ struct ObxCilGenImp : public AstVisitor
             }
             break;
         case BuiltIn::FLOOR:
+        case BuiltIn::ENTIER:
             Q_ASSERT( ae->d_args.size() == 1 );
             ae->d_args.first()->accept(this);
             convertTo(Type::LONGREAL,ae->d_args.first()->d_type.data(), ae->d_args.first()->d_loc);
@@ -2429,12 +2438,6 @@ struct ObxCilGenImp : public AstVisitor
                 line(ae->d_loc).conv_(IlEmitter::ToI8);
             else
                 line(ae->d_loc).conv_(IlEmitter::ToI4);
-            break;
-        case BuiltIn::ENTIER: // obsolete
-            Q_ASSERT( ae->d_args.size() == 1 );
-            ae->d_args.first()->accept(this);
-            line(ae->d_loc).call_("float64 [mscorlib]System.Math::Floor(float64)", 1, true );
-            line(ae->d_loc).conv_(IlEmitter::ToI8);
             break;
 #if 0
         case BuiltIn::LSL:
@@ -2490,25 +2493,25 @@ struct ObxCilGenImp : public AstVisitor
         case BuiltIn::BITAND:
             Q_ASSERT( ae->d_args.size() == 2 );
             ae->d_args.first()->accept(this);
-            adjustTypes(ae->d_args.first()->d_type.data(), ae->d_args.last()->d_type.data(), ae->d_args.first()->d_loc);
+            adjustInteger(ae->d_args.first()->d_type.data(), ae->d_args.last()->d_type.data(), ae->d_args.first()->d_loc);
             ae->d_args.last()->accept(this);
-            adjustTypes(ae->d_args.last()->d_type.data(), ae->d_args.first()->d_type.data(), ae->d_args.last()->d_loc);
+            adjustInteger(ae->d_args.last()->d_type.data(), ae->d_args.first()->d_type.data(), ae->d_args.last()->d_loc);
             line(ae->d_loc).and_();
             break;
         case BuiltIn::BITOR:
             Q_ASSERT( ae->d_args.size() == 2 );
             ae->d_args.first()->accept(this);
-            adjustTypes(ae->d_args.first()->d_type.data(), ae->d_args.last()->d_type.data(), ae->d_args.first()->d_loc);
+            adjustInteger(ae->d_args.first()->d_type.data(), ae->d_args.last()->d_type.data(), ae->d_args.first()->d_loc);
             ae->d_args.last()->accept(this);
-            adjustTypes(ae->d_args.last()->d_type.data(), ae->d_args.first()->d_type.data(), ae->d_args.last()->d_loc);
+            adjustInteger(ae->d_args.last()->d_type.data(), ae->d_args.first()->d_type.data(), ae->d_args.last()->d_loc);
             line(ae->d_loc).or_();
             break;
         case BuiltIn::BITXOR:
             Q_ASSERT( ae->d_args.size() == 2 );
             ae->d_args.first()->accept(this);
-            adjustTypes(ae->d_args.first()->d_type.data(), ae->d_args.last()->d_type.data(), ae->d_args.first()->d_loc);
+            adjustInteger(ae->d_args.first()->d_type.data(), ae->d_args.last()->d_type.data(), ae->d_args.first()->d_loc);
             ae->d_args.last()->accept(this);
-            adjustTypes(ae->d_args.last()->d_type.data(), ae->d_args.first()->d_type.data(), ae->d_args.last()->d_loc);
+            adjustInteger(ae->d_args.last()->d_type.data(), ae->d_args.first()->d_type.data(), ae->d_args.last()->d_loc);
             line(ae->d_loc).xor_();
             break;
         case BuiltIn::BITNOT:
@@ -2680,12 +2683,11 @@ struct ObxCilGenImp : public AstVisitor
     static inline bool isReferenceType( Type* t )
     {
         Type* td = derefed(t);
-        if( td && td->isStructured() )
+        if( td && td->isStructured() && !td->d_unsafe )
             return true;
         else
             return false;
     }
-
 
     void preparePinnedArray( Type* t, const RowCol& loc )
     {
@@ -2989,8 +2991,9 @@ struct ObxCilGenImp : public AstVisitor
         }else if( tfd->d_unsafe && tagf == Thing::T_Record )
             line(loc).ldobj_(formatType(tf)); // the formal requires a cstruct by value, so we fetch it
         else if( tagf == Thing::T_BaseType )
-            convertTo(tfd->getBaseType(), ta, ea->d_loc);
-        else if( tagf == Thing::T_Pointer && tfd->d_unsafe && ta->isInteger() )
+        {
+            convertTo(tfd->getBaseType(), ta, ea->d_loc, debug && tfd->isInteger() ); // with overflow check for ints when debugging
+        }else if( tagf == Thing::T_Pointer && tfd->d_unsafe && ta->isInteger() )
             line(ea->d_loc).conv_(IlEmitter::ToI);
     }
 
@@ -3048,12 +3051,17 @@ struct ObxCilGenImp : public AstVisitor
         }
     }
 
-    void convertTo( quint8 toBaseType, Type* from, const RowCol& loc )
+    void convertTo( quint8 toBaseType, Type* from, const RowCol& loc, bool checkOvf = false )
     {
         from = derefed(from);
         if( from == 0 )
             return;
         const int fromBaseType = from->getBaseType();
+        convertTo( toBaseType, fromBaseType, loc, checkOvf );
+    }
+
+    void convertTo( quint8 toBaseType, quint8 fromBaseType, const RowCol& loc, bool checkOvf = false )
+    {
         if( toBaseType == fromBaseType )
             return;
         switch( toBaseType )
@@ -3069,16 +3077,16 @@ struct ObxCilGenImp : public AstVisitor
         case Type::INTEGER:
         case Type::SET:
         case Type::ENUMINT:
-            line(loc).conv_(IlEmitter::ToI4);
+            line(loc).conv_(IlEmitter::ToI4, checkOvf);
             break;
         case Type::SHORTINT:
         case Type::CHAR:
         case Type::WCHAR:
-            line(loc).conv_(IlEmitter::ToI2);
+            line(loc).conv_(IlEmitter::ToI2, checkOvf);
             break;
         case Type::BYTE:
         case Type::BOOLEAN:
-            line(loc).conv_(IlEmitter::ToU1);
+            line(loc).conv_(IlEmitter::ToU1, checkOvf, checkOvf);
             break;
         }
     }
@@ -3098,21 +3106,71 @@ struct ObxCilGenImp : public AstVisitor
         }
     }
 
-    void adjustTypes( Type* cur, Type* other, const RowCol& loc )
+    void adjustType( quint8 result, quint8 operand, const RowCol& loc )
     {
+        // Expects derefed types
+        const int r = widenType(result);
+        const int o = widenType(operand);
+        if( r == o )
+            return;
+        convertTo( r, o, loc, debug );
+    }
+
+    void adjustInteger( Type* cur, Type* other, const RowCol& loc )
+    {
+        // only used for bitops to assure cur is either INTEGER or LONGINT!
         cur = derefed(cur);
         other = derefed(other);
         Q_ASSERT( cur && other );
         const int c = widenType(cur->getBaseType());
         const int o = widenType(other->getBaseType());
+        // c and o could be INTEGER, LONGINT, REAL and LONGREAL
         if( c == o )
             return;
         if( o == Type::LONGINT && c != Type::LONGINT )
             convertTo(Type::LONGINT, cur, loc);
-        else if( o == Type::LONGREAL && c != Type::LONGREAL )
-            convertTo(Type::LONGREAL, cur, loc);
-        else if( o == Type::REAL && c == Type::INTEGER )
-            convertTo(Type::REAL, cur, loc);
+        Q_ASSERT( o != Type::LONGREAL && o != Type::REAL );
+    }
+
+    void emitArithOvfOp( BinExpr* me )
+    {
+        Type* td = derefed(me->d_type.data());
+        bool ovfCheck = false;
+        switch( me->d_op )
+        {
+        case BinExpr::ADD:
+            if( td && debug && td->isInteger() )
+            {
+                line(me->d_loc).add_(true);
+                ovfCheck = td->getBaseType() < Type::INTEGER;
+            }else
+                line(me->d_loc).add_();
+            break;
+        case BinExpr::SUB:
+            if( td && debug && td->isInteger() )
+            {
+                line(me->d_loc).sub_(true);
+                ovfCheck = td->getBaseType() < Type::INTEGER;
+            }else
+                line(me->d_loc).sub_();
+            break;
+        case BinExpr::MUL:
+            if( td && debug && td->isInteger() )
+            {
+                line(me->d_loc).mul_(true);
+                ovfCheck = td->getBaseType() < Type::INTEGER;
+            }else
+                line(me->d_loc).mul_();
+            break;
+        default:
+            Q_ASSERT(false);
+        }
+        if( ovfCheck )
+        {
+            line(me->d_loc).dup_();
+            line(me->d_loc).ldc_i4( td->getByteSize() );
+            line(me->d_loc).call_("void [OBX.Runtime]OBX.Runtime::CheckOvf(int32,int32)", 2 );
+        }
     }
 
     void visit( BinExpr* me)
@@ -3122,22 +3180,27 @@ struct ObxCilGenImp : public AstVisitor
 
         Type* lhsT = derefed(me->d_lhs->d_type.data());
         Type* rhsT = derefed(me->d_rhs->d_type.data());
-        Q_ASSERT( lhsT && rhsT );
+        Type* targetT = derefed(me->d_type.data());
+        Q_ASSERT( lhsT && rhsT && targetT);
 
         me->d_lhs->accept(this);
         if( me->isRelation() )
-            convertTo(me->d_inclType, me->d_lhs->d_type.data(), me->d_lhs->d_loc);
+            adjustType(me->d_inclType, lhsT->getBaseType(), me->d_lhs->d_loc );
+            //convertTo(me->d_inclType, me->d_lhs->d_type.data(), me->d_lhs->d_loc, debug );
         else if( me->isArithOp() )
-            adjustTypes( lhsT, rhsT, me->d_lhs->d_loc );
+            adjustType( targetT->getBaseType(), lhsT->getBaseType(), me->d_lhs->d_loc );
+            //convertTo(widenType(targetT->getBaseType()), me->d_lhs->d_type.data(), me->d_lhs->d_loc, debug );
 
         if( me->d_op != BinExpr::AND && me->d_op != BinExpr::OR )
         {
             // AND and OR are special in that rhs might not be executed
             me->d_rhs->accept(this);
             if( me->isRelation() )
-                convertTo(me->d_inclType, me->d_rhs->d_type.data(), me->d_rhs->d_loc );
+                adjustType(me->d_inclType, rhsT->getBaseType(), me->d_rhs->d_loc );
+                //convertTo(me->d_inclType, me->d_rhs->d_type.data(), me->d_rhs->d_loc, debug );
             else if( me->isArithOp() )
-                adjustTypes( rhsT, lhsT, me->d_rhs->d_loc );
+                adjustType( targetT->getBaseType(), rhsT->getBaseType(), me->d_rhs->d_loc );
+                //convertTo(widenType(targetT->getBaseType()), me->d_rhs->d_type.data(), me->d_rhs->d_loc, debug );
         }
 
         const int ltag = lhsT->getTag();
@@ -3163,7 +3226,7 @@ struct ObxCilGenImp : public AstVisitor
         case BinExpr::ADD:
             if( ( lhsT->isNumeric() && rhsT->isNumeric() ) ||
                     ( ltag == Thing::T_Enumeration && rtag == Thing::T_Enumeration ) )
-                line(me->d_loc).add_();
+                emitArithOvfOp(me);
             else if( lhsT->isSet() && rhsT->isSet() )
                 line(me->d_loc).or_();
             else if( lhsT->isText(&lwide) && rhsT->isText(&rwide) && !lhsT->d_unsafe && !rhsT->d_unsafe )
@@ -3182,7 +3245,7 @@ struct ObxCilGenImp : public AstVisitor
         case BinExpr::SUB:
             if( (lhsT->isNumeric() && rhsT->isNumeric()) ||
                     ( ltag == Thing::T_Enumeration && rtag == Thing::T_Enumeration ) )
-                line(me->d_loc).sub_();
+                emitArithOvfOp(me);
             else if( lhsT->isSet() && rhsT->isSet() )
             {
                 line(me->d_loc).not_();
@@ -3213,7 +3276,7 @@ struct ObxCilGenImp : public AstVisitor
             break;
         case BinExpr::MUL:
             if( lhsT->isNumeric() && rhsT->isNumeric() )
-                line(me->d_loc).mul_();
+                emitArithOvfOp(me);
             else if( lhsT->isSet() && rhsT->isSet() )
                 line(me->d_loc).and_();
             else
@@ -3412,6 +3475,20 @@ struct ObxCilGenImp : public AstVisitor
         }
     }
 
+    quint8 inclusiveType1(Type* lhs, Type* rhs) const
+    {
+        if( lhs == 0 || rhs == 0 )
+            return 0;
+        const quint8 l = lhs->getBaseType();
+        const quint8 r = rhs->getBaseType();
+        if( ( l == Type::CHAR && r == Type::STRING ) ||
+            ( l == Type::WCHAR && r == Type::WSTRING ) ||
+            ( l == Type::WCHAR && r == Type::STRING ) )
+            return r;
+        return Validator::inclusiveType( l, r ).first;
+    }
+
+
     void visit( ForLoop* me)
     {
         //const int before = stackDepth;
@@ -3436,7 +3513,8 @@ struct ObxCilGenImp : public AstVisitor
             cond->d_op = BinExpr::GEQ;
         cond->d_lhs = me->d_id;
         cond->d_rhs = me->d_to;
-        cond->d_type = me->d_id->d_type.data();
+        cond->d_inclType = inclusiveType1(derefed(me->d_id->d_type.data()), derefed(me->d_to->d_type.data()) );
+        cond->d_type = new BaseType(Type::BOOLEAN); // me->d_id->d_type.data();
         loop->d_if.append( cond.data() );
 
         loop->d_then.append( me->d_do );
@@ -3810,6 +3888,7 @@ struct ObxCilGenImp : public AstVisitor
                             lhs->d_lhs = me->d_exp;
                             lhs->d_rhs = bi->d_lhs;
                             lhs->d_loc = l->d_loc;
+                            lhs->d_inclType = inclusiveType1(derefed(me->d_exp->d_type.data()), derefed(bi->d_lhs->d_type.data()) );
                             lhs->d_type = boolean.data();
 
                             Ref<BinExpr> rhs = new BinExpr();
@@ -3817,6 +3896,7 @@ struct ObxCilGenImp : public AstVisitor
                             rhs->d_lhs = me->d_exp;
                             rhs->d_rhs = bi->d_rhs;
                             rhs->d_loc = l->d_loc;
+                            rhs->d_inclType = inclusiveType1(derefed(me->d_exp->d_type.data()), derefed(bi->d_rhs->d_type.data()) );
                             rhs->d_type = boolean.data();
 
                             _and->d_lhs = lhs.data();
@@ -3832,6 +3912,7 @@ struct ObxCilGenImp : public AstVisitor
                         eq->d_op = BinExpr::EQ;
                         eq->d_lhs = me->d_exp;
                         eq->d_rhs = l;
+                        eq->d_inclType = inclusiveType1(derefed(me->d_exp->d_type.data()), derefed(l->d_type.data()) );
                         eq->d_loc = l->d_loc;
                         eq->d_type = boolean.data();
 

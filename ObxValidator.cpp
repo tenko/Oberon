@@ -634,7 +634,6 @@ struct ValidatorImp : public AstVisitor
         case BuiltIn::SYS_LDREG:
         case BuiltIn::SYS_REG:
         case BuiltIn::SYS_COPY:
-        case BuiltIn::ODD:
         case BuiltIn::CHR:
         case BuiltIn::INCL:
         case BuiltIn::EXCL:
@@ -647,7 +646,6 @@ struct ValidatorImp : public AstVisitor
         case BuiltIn::BITS:
         case BuiltIn::HALT:
         case BuiltIn::ROR:
-        case BuiltIn::ENTIER:
             return false; // these can be handled by ordinary arg checker
 
         case BuiltIn::BITNOT:
@@ -682,6 +680,7 @@ struct ValidatorImp : public AstVisitor
                 error( args->d_loc, Validator::tr("expecting two arguments"));
             break;
         case BuiltIn::FLOOR:
+        case BuiltIn::ENTIER:
             if( args->d_args.size() == 1 )
             {
                 Type* td = derefed(args->d_args.first()->d_type.data());
@@ -691,6 +690,7 @@ struct ValidatorImp : public AstVisitor
                 error( args->d_loc, Validator::tr("expecting one argument"));
            break;
         case BuiltIn::FLT:
+        case BuiltIn::ODD:
             if( args->d_args.size() == 1 )
             {
                 Type* td = derefed(args->d_args.first()->d_type.data());
@@ -1343,6 +1343,7 @@ struct ValidatorImp : public AstVisitor
             }
             break;
         case BuiltIn::FLOOR:
+        case BuiltIn::ENTIER:
             if( !args.isEmpty() )
             {
                 Type* td = derefed(args.first()->d_type.data());
@@ -1435,7 +1436,7 @@ struct ValidatorImp : public AstVisitor
                 else
                     return args.first()->d_type.data();
             }else if( args.size() == 2 )
-                return inclusiveType1(derefed(args.first()->d_type.data()),derefed(args.last()->d_type.data()));
+                return inclusiveType1(derefed(args.first()->d_type.data()),derefed(args.last()->d_type.data())).first;
             break;
         case BuiltIn::DEFAULT:
             if( args.size() == 1 )
@@ -1762,9 +1763,13 @@ struct ValidatorImp : public AstVisitor
                 me->d_type = bt.d_boolType;
                 if( isNumeric(lhsT) && isNumeric(rhsT) )
                 {
-                    Type* t = inclusiveType1(lhsT,rhsT);
-                    if( t )
-                        me->d_inclType = t->d_baseType;
+                    QPair<Type*,bool> t = inclusiveType1(lhsT,rhsT);
+                    if( t.first )
+                    {
+                        me->d_inclType = t.first->d_baseType;
+                        if( !t.second )
+                            conversionWarning(lhsT,rhsT,me->d_loc);
+                    }
                 }
             }else
             {
@@ -1784,9 +1789,13 @@ struct ValidatorImp : public AstVisitor
                 me->d_type = bt.d_boolType;
                 if( isNumeric(lhsT) && isNumeric(rhsT) )
                 {
-                    Type* t = inclusiveType1(lhsT,rhsT);
-                    if( t )
-                        me->d_inclType = t->d_baseType;
+                    QPair<Type*,bool> t = inclusiveType1(lhsT,rhsT);
+                    if( t.first )
+                    {
+                        me->d_inclType = t.first->d_baseType;
+                        if( !t.second )
+                            conversionWarning(lhsT,rhsT,me->d_loc);
+                    }
                 }
             }else
             {
@@ -1831,7 +1840,10 @@ struct ValidatorImp : public AstVisitor
         case BinExpr::MUL:
             if( isNumeric(lhsT) && isNumeric(rhsT) )
             {
-                me->d_type = inclusiveType1(lhsT,rhsT);
+                QPair<Type*,bool> t = inclusiveType1(lhsT,rhsT);
+                me->d_type = t.first;
+                if( t.first && !t.second )
+                    conversionWarning(lhsT,rhsT,me->d_loc);
             }else if( lhsT == bt.d_setType && rhsT == bt.d_setType )
                 me->d_type = bt.d_setType;
 #ifdef OBX_BBOX
@@ -1864,11 +1876,16 @@ struct ValidatorImp : public AstVisitor
 
         case BinExpr::DIV:  // int
         case BinExpr::MOD:  // int
-            if( !isInteger(lhsT ) )
-                error( me->d_lhs->d_loc, Validator::tr("integer type expected for left side of MOD or DIV operator") );
-            if( !isInteger(rhsT ) )
-                error( me->d_rhs->d_loc, Validator::tr("integer type expected for right side of MOD or DIV operator") );
-            me->d_type = inclusiveType1(lhsT,rhsT);
+            {
+                if( !isInteger(lhsT ) )
+                    error( me->d_lhs->d_loc, Validator::tr("integer type expected for left side of MOD or DIV operator") );
+                if( !isInteger(rhsT ) )
+                    error( me->d_rhs->d_loc, Validator::tr("integer type expected for right side of MOD or DIV operator") );
+                QPair<Type*,bool> t = inclusiveType1(lhsT,rhsT);
+                me->d_type = t.first;
+                if( t.first && !t.second )
+                    conversionWarning(lhsT,rhsT,me->d_loc);
+            }
             break;
 
         case BinExpr::OR:  // bool
@@ -3113,36 +3130,58 @@ struct ValidatorImp : public AstVisitor
 
     bool includes( Type* lhs, Type* rhs ) const
     {
+        // expects derefed types
         if( lhs == rhs )
             return true;
-        if( lhs == bt.d_longType )
-            return rhs == bt.d_byteType || rhs == bt.d_intType || rhs == bt.d_shortType;
-        if( lhs == bt.d_intType )
-            return rhs == bt.d_byteType || rhs == bt.d_shortType;
-        if( lhs == bt.d_shortType )
-            return rhs == bt.d_byteType;
-        if( lhs == bt.d_byteType )
+        if( lhs == 0 || rhs == 0 )
             return false;
-        if( lhs == bt.d_realType )
-            return rhs == bt.d_byteType || rhs == bt.d_shortType ||
-                     rhs == bt.d_intType; // RISK: possible loss of precision
-        if( lhs == bt.d_longrealType )
-            return rhs == bt.d_byteType || rhs == bt.d_intType || rhs == bt.d_shortType || rhs == bt.d_longType ||
-                    rhs == bt.d_realType;
-        if( lhs == bt.d_wcharType )
-            return rhs == bt.d_charType;
-        if( lhs == bt.d_wstringType )
-            return rhs == bt.d_stringType || rhs == bt.d_charType;
-        // can happen if QualiType not relovable Q_ASSERT( false );
-        return false;
+        return Validator::includesType( lhs->getBaseType(), rhs->getBaseType() );
     }
 
-    Type* inclusiveType1(Type* lhs, Type* rhs) const
+    Type* baseToType( quint8 baseType ) const
     {
-        if( includes( lhs, rhs ) )
-            return lhs;
-        else
-            return rhs;
+        switch( baseType )
+        {
+        case Type::BYTE:
+            return bt.d_byteType;
+        case Type::SHORTINT:
+            return bt.d_shortType;
+        case Type::INTEGER:
+            return bt.d_intType;
+        case Type::LONGINT:
+            return bt.d_longType;
+        case Type::REAL:
+            return bt.d_realType;
+        case Type::LONGREAL:
+            return bt.d_longrealType;
+        case Type::BOOLEAN:
+            return bt.d_boolType;
+        case Type::CHAR:
+            return bt.d_charType;
+        case Type::WCHAR:
+            return bt.d_wcharType;
+        case Type::SET:
+            return bt.d_setType;
+        case Type::STRING:
+            return bt.d_stringType;
+        case Type::WSTRING:
+            return bt.d_wstringType;
+        case Type::BYTEARRAY:
+            return bt.d_byteArrayType;
+        case Type::NIL:
+            return bt.d_nilType;
+        }
+        Q_ASSERT(false);
+        return 0;
+    }
+
+    QPair<Type*,bool> inclusiveType1(Type* lhs, Type* rhs) const
+    {
+        // expects derefed types
+        if( lhs == 0 || rhs == 0 )
+            return qMakePair((Type*)0,false);
+        QPair<quint8, bool> t = Validator::inclusiveType(lhs->getBaseType(), rhs->getBaseType() );
+        return qMakePair(baseToType(t.first),t.second);
     }
 
     Type* inclusiveType2(Type* lhs, Type* rhs) const
@@ -3348,6 +3387,13 @@ struct ValidatorImp : public AstVisitor
         return false;
     }
 
+    void conversionWarning(Type* lhs, Type* rhs, const RowCol& loc ) const
+    {
+        warning( loc, Validator::tr("possible loss of information when converting %1 to %2")
+                 .arg(rhs->pretty()).arg(lhs->pretty()));
+
+    }
+
     bool assignmentCompatible( Type* lhsT, Expression* rhs ) const
     {
         if( lhsT == 0 || rhs == 0 || rhs->d_type.isNull() )
@@ -3378,7 +3424,7 @@ struct ValidatorImp : public AstVisitor
         {
             if( isInteger(lhsT) && rtag == Thing::T_Enumeration )
             {
-                // automatically convert enumeration to number TODO: should we really do this?
+                // automatically convert enumeration to number
                 Enumeration* en = cast<Enumeration*>(rhsT);
                 if( en->d_items.size() < 256 )
                     rhsT = bt.d_byteType;
@@ -3387,13 +3433,9 @@ struct ValidatorImp : public AstVisitor
                 else
                     rhsT = bt.d_intType;
             }
-            if( includes(lhsT,rhsT) )
-                return true;
-            else
-            {
-                warning( rhs->d_loc, Validator::tr("possible loss of information") );
-                return true;
-            }
+            if( !includes(lhsT,rhsT) )
+                conversionWarning(lhsT,rhsT,rhs->d_loc);
+            return true;
         }else if( lhsT == bt.d_wcharType && rhsT == bt.d_charType )
             return true;
 
@@ -3823,6 +3865,64 @@ bool Validator::check(Module* m, const BaseTypes& bt, Ob::Errors* err, Instantia
     m->d_hasErrors = ( err->getErrCount() - errCount ) != 0;
 
     return !m->d_hasErrors;
+}
+
+bool Validator::includesType(quint8 lhs, quint8 rhs)
+{
+    if( lhs == rhs )
+        return true;
+
+    /*
+        LONGINT >= INTEGER >= SHORTINT >= BYTE
+        LONGREAL >= REAL >= SHORTINT >= BYTE
+        LONGREAL >= INTEGER >= SHORTINT >= BYTE
+        WCHAR >= CHAR
+
+        non-inclusive pairs: REAL/INTEGER, REAL/LONGINT, LONGREAL/LONGINT
+    */
+
+    switch( lhs )
+    {
+    case Type::LONGINT:
+        return rhs == Type::BYTE || rhs == Type::INTEGER || rhs == Type::SHORTINT;
+    case Type::INTEGER:
+        return rhs == Type::BYTE || rhs == Type::SHORTINT;
+    case Type::SHORTINT:
+        return rhs == Type::BYTE;
+    case Type::BYTE:
+        break;
+    case Type::LONGREAL:
+        return rhs == Type::BYTE || rhs == Type::INTEGER || rhs == Type::SHORTINT ||
+                rhs == Type::REAL;
+    case Type::REAL:
+        return rhs == Type::BYTE || rhs == Type::SHORTINT;
+    case Type::WCHAR:
+        return rhs == Type::CHAR;
+    case Type::WSTRING:
+        return rhs == Type::STRING || rhs == Type::CHAR;
+    }
+    return false;
+}
+
+QPair<quint8, bool> Validator::inclusiveType(quint8 lhs, quint8 rhs)
+{
+    if( includesType(lhs,rhs) )
+        return qMakePair(lhs,true);
+    else if( includesType(rhs,lhs) )
+        return qMakePair(rhs,true);
+
+    // and now for the non-inclusive pairs
+    if( ( lhs == Type::REAL && rhs == Type::INTEGER ) ||
+        ( lhs == Type::INTEGER && rhs == Type::REAL ) )
+        return qMakePair(Type::REAL,false);
+    if( ( lhs == Type::REAL && rhs == Type::LONGINT ) ||
+        ( lhs == Type::LONGINT && rhs == Type::REAL ) )
+        return qMakePair(Type::LONGREAL,false);
+    if( ( lhs == Type::LONGREAL && rhs == Type::LONGINT ) ||
+        ( lhs == Type::LONGINT && rhs == Type::LONGREAL ) )
+        return qMakePair(Type::LONGREAL,false);
+    Q_ASSERT(false);
+    return qMakePair(0,false);
 }
 
 Validator::BaseTypes::BaseTypes()
