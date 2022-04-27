@@ -78,7 +78,8 @@ RC_ICONS = images/Oberon.ico
 
 CONFIG(static) {
     message(static build)
-LIBS += -lQt5Network
+    RESOURCES += Font2.qrc
+    LIBS += -lQt5Network
 } else {
     message(dynamic build)
 }

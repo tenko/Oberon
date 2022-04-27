@@ -154,8 +154,12 @@ struct ValidatorImp : public AstVisitor
         ProcType* callerPt = caller->getProcType();
         foreach( Procedure* called, caller->d_calling )
         {
+#if 0
+            // this is wrong, since a procedure might not yet be identified as intermediate, even if so;
+            // Example: GameHunter msysTextOut.Set.WriteInt
             if( !called->d_upvalIntermediate && !called->d_upvalSink )
                 continue;
+#endif
             collectNonLocals(called,visited, level+1);
             ProcType* calledPt = called->getProcType();
             foreach( Named* nl, calledPt->d_nonLocals )
@@ -347,6 +351,14 @@ struct ValidatorImp : public AstVisitor
     {
         levels.push_back(me);
         visitScope(me); // also handles formal parameters
+        foreach( const Ref<Named>& n, me->d_order )
+        {
+            if( n->getTag() == Thing::T_Procedure && n->d_upvalSource )
+            {
+                QSet<Procedure*> visited;
+                collectNonLocals( cast<Procedure*>(n.data()), visited );
+            }
+        }
         returnValueFound = false;
         visitStats( me->d_body );
         if( !mod->d_isDef &&
@@ -535,6 +547,15 @@ struct ValidatorImp : public AstVisitor
                 lhs == bt.d_realType || lhs == bt.d_longrealType || lhs == bt.d_setType;
     }
 
+    bool isInParam( Expression* e )
+    {
+        Named* n = e->getIdent();
+        if( n != 0 && n->getTag() == Thing::T_Parameter )
+            return cast<Parameter*>(n)->d_const;
+        else
+            return false;
+    }
+
     bool isMemoryLocation( Expression* e )
     {
         Named* n = e->getIdent();
@@ -629,11 +650,6 @@ struct ValidatorImp : public AstVisitor
 
         switch( bi->d_func )
         {
-        case BuiltIn::SYS_BIT:
-        case BuiltIn::SYS_H:
-        case BuiltIn::SYS_LDREG:
-        case BuiltIn::SYS_REG:
-        case BuiltIn::SYS_COPY:
         case BuiltIn::CHR:
         case BuiltIn::INCL:
         case BuiltIn::EXCL:
@@ -1060,6 +1076,11 @@ struct ValidatorImp : public AstVisitor
                 error( args->d_loc, Validator::tr("expecting one argument"));
             break;
         case BuiltIn::SYS_ADR:
+        case BuiltIn::SYS_BIT:
+        case BuiltIn::SYS_H:
+        case BuiltIn::SYS_LDREG:
+        case BuiltIn::SYS_REG:
+        case BuiltIn::SYS_COPY:
         case BuiltIn::SYS_GET:
         case BuiltIn::SYS_PUT:
         case BuiltIn::SYS_VAL:
@@ -1070,6 +1091,7 @@ struct ValidatorImp : public AstVisitor
         case BuiltIn::SYS_GETREG:
         case BuiltIn::SYS_PUTREG:
         case BuiltIn::SYS_TYP:
+            warning( args->d_loc, Validator::tr("Oberon+ doesn't have a built-in SYSTEM module") );
             break; // TODO ignored for now
         }
         return true;
@@ -1200,6 +1222,16 @@ struct ValidatorImp : public AstVisitor
 #endif
 #endif
 
+#if 0
+        // too strong
+        if( tftag == Thing::T_Pointer && tatag == Thing::T_Pointer && isInParam(actual.data())
+                && !formal->d_var && !formal->d_const )
+        {
+            error( actual->d_loc, Validator::tr("IN pointer cannot be passed by value"));
+            return;
+        }
+#endif
+
 #ifdef OBX_SUPPORT_CB_DELEG_
         if( tftag == Thing::T_ProcType && tf->d_unsafe && !tf->d_typeBound
                 && tatag == Thing::T_ProcType && ta->d_typeBound )
@@ -1238,8 +1270,10 @@ struct ValidatorImp : public AstVisitor
             }
 #endif
             if( !ok )
+            {
                 error( actual->d_loc, Validator::tr("cannot pass this expression to a VAR parameter") );
-            else
+                return;
+            }else
                 checkValidLhs(actual.data());
         }
 
@@ -1251,16 +1285,18 @@ struct ValidatorImp : public AstVisitor
         {
             // If Tf is an open array, then a must be array compatible with f
             if( !arrayCompatible( af, actual->d_type.data(), actual->d_loc ) )
+            {
                 error( actual->d_loc,
                        Validator::tr("actual open array parameter type %1 not compatible with formal type of %2%3")
                        .arg(actual->d_type->pretty()).arg(var).arg(formal->d_type->pretty()));
+                return;
+            }
         }
         else
         {
             // Otherwise Ta must be parameter compatible to f
             if( !paramCompatible( formal, actual.data() ) )
             {
-                //paramCompatible( formal, actual.data() ); // TEST
                 error( actual->d_loc,
                    Validator::tr("actual parameter type %1 not compatible with formal type %2%3")
                    .arg(actual->d_type->pretty()).arg(var).arg(formal->d_type->pretty()));
@@ -2043,11 +2079,15 @@ struct ValidatorImp : public AstVisitor
                 }else
                 {
                     bool ok;
-                    const int len = res.d_value.toInt(&ok);
+                    const qint64 len = res.d_value.toLongLong(&ok);
                     if( res.d_vtype != Literal::Integer || !ok || len <= 0 )
                     {
                         me->d_len = -1;
                         error( me->d_lenExpr->d_loc, Validator::tr("expecting positive non-zero integer for array length") );
+                    }else if( len > std::numeric_limits<qint32>::max() )
+                    {
+                        me->d_len = -1;
+                        error( me->d_lenExpr->d_loc, Validator::tr("maximum supported array length is MAX(INTEGER)") );
                     }else
                         me->d_len = len;
                 }
@@ -2326,7 +2366,7 @@ struct ValidatorImp : public AstVisitor
         me->d_visited = true;
         constTrace.remove(me);
         Type* td = derefed(me->d_type.data());
-        if( td->isInteger() )
+        if( td && td->isInteger() )
         {
 #if 0
             bool overflow = false;
@@ -2403,22 +2443,31 @@ struct ValidatorImp : public AstVisitor
 
         checkNoBooleanTypeInUnsafe(me->d_type.data(), me->d_unsafe, me->d_loc);
         Type* td = derefed(me->d_type.data());
+        if( td == 0 )
+            return; // already reported
         if( me->d_unsafe && me->d_var )
             error(me->d_loc, Validator::tr("VAR not supported in external library modules") );
-        else if( td && td->d_unsafe && me->d_var && td->isStructured() )
+        else if( td->d_unsafe && me->d_var && td->isStructured() )
             error(me->d_loc, Validator::tr("VAR not supported with unsafe structured types") );
         if( me->d_unsafe )
             checkNoArrayByVal(me->d_type.data(),me->d_loc);
+        const int tag = td->getTag();
+#if 0
+        // not good; too much code dependend on IN pointer, e.g. in Awfy
+        // instead we could forbid assignment/actual arg of IN pointer to another pointer
+        if( me->d_var && me->d_const && !td->d_unsafe && tag != Thing::T_Record && tag != Thing::T_Array )
+            error(me->d_loc, Validator::tr("IN can only be used for array and record parameters") );
+#endif
         checkNoVla(me->d_type.data(),me->d_loc);
+
 #if 0 // TEST
         checkUnsafePointer(me->d_type.data(),false,me->d_loc);
 #endif
 
         // open array value parameter are supported in all old Oberon/-2, Oberon-07 and BBOX
-        Type* t = derefed(me->d_type.data());
-        if( !me->d_unsafe && t && t->getTag() == Thing::T_Array )
+        if( !me->d_unsafe && tag == Thing::T_Array )
         {
-            Array* a = cast<Array*>( t );
+            Array* a = cast<Array*>( td );
             if( a->d_lenExpr.isNull() && !me->d_var )
                 warning( me->d_loc, Validator::tr("passing an array by value might be inefficient") );
                 // TODO: check body if the array is lhs at all
@@ -2517,8 +2566,17 @@ struct ValidatorImp : public AstVisitor
         if( !pt->d_return.isNull() && !me->d_what.isNull() )
         {
             checkValidRhs(me->d_what.data());
+#if 0
+            // too strong
+            Type* ld = derefed(pt->d_return.data());
+            Type* rd = derefed(me->d_what->d_type.data());
+            if( ld == 0 || rd == 0 )
+                return; // already reported
+            if( ld->getTag() == Thing::T_Pointer && rd->getTag() == Thing::T_Pointer && isInParam(me->d_what.data()) )
+                error( me->d_what->d_loc, Validator::tr("IN pointer cannot be returned"));
+#endif
             if( !assignmentCompatible(pt->d_return.data(), me->d_what.data() ) )
-                error( me->d_loc, Validator::tr("return expression is not assignment compatible with function return type"));
+                error( me->d_what->d_loc, Validator::tr("return expression is not assignment compatible with function return type"));
         }
 
         // TODO: check in a function whether all paths return a value
@@ -2620,6 +2678,13 @@ struct ValidatorImp : public AstVisitor
         }
 #endif
 #endif
+
+#if 0
+        // too strong
+        if( lhsTag == Thing::T_Pointer && rhsTag == Thing::T_Pointer && isInParam(me->d_rhs.data()) )
+            error( me->d_rhs->d_loc, Validator::tr("IN pointer cannot be assigned"));
+#endif
+
         if( lhsT->getTag() == Thing::T_Array && me->d_rhs->getTag() == Thing::T_Literal )
         {
             Array* a = cast<Array*>(lhsT);
@@ -3457,7 +3522,6 @@ struct ValidatorImp : public AstVisitor
         {
             if( rtag == Thing::T_Pointer && equalType( lhsT, rhsT ) )
                 return true;
-
 #if 0
             // TODO: why do we need this rule? There are actually two cases in BB which need it,
             // but the original rule would allow assignment of safe to unsafe text pointer und vice versa

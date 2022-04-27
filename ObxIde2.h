@@ -84,7 +84,7 @@ namespace Obx
         void createXref();
         void createStack();
         void createLocals();
-        void createMenu();
+        void createModsMenu();
         void createMenuBar();
         void closeEvent(QCloseEvent* event);
         bool checkSaved( const QString& title );
@@ -97,7 +97,7 @@ namespace Obx
         Editor* showEditor(const QString& path, int row = -1, int col = -1, bool setMarker = false , bool center = false);
         void showEditor(Named*, bool setMarker = false, bool center = false);
         void showEditor( const Location& );
-        void createMenu( Editor* );
+        void createModsMenu( Editor* );
         void addDebugMenu(Gui::AutoMenu * pop);
         void fillXref();
         void fillXref(Named*);
@@ -147,7 +147,6 @@ namespace Obx
         void onRemoveDir();
         void onEnableDebug();
         void onBreak();
-        void onClearTerm();
         void handleGoBack();
         void handleGoForward();
         void onUpdateLocation(int line, int col );
@@ -173,9 +172,7 @@ namespace Obx
         void onBreakOnExceptions();
         void onRowColMode();
         void onSetInputFile();
-        void openRecentFile();
-        void setCurrentFile(const QString &fileName);
-        void updateRecentFileActions();
+        void onSetOptions();
     private:
         class DocTab;
         DocTab* d_tab;
@@ -216,9 +213,6 @@ namespace Obx
         quint8 d_curLevel;
         QHash<QByteArray, QSet<quint32> > d_breakPoints; // module name -> line number
         QHash<Module*,quint32> d_loadedAssemblies; // -> assemblyId
-        enum { MaxRecentFiles = 5 };
-        QAction *recentFileActs[MaxRecentFiles];
-        QAction *separatorAct;
     };
 }
 

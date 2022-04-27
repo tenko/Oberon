@@ -417,12 +417,6 @@ Ide::Ide(QWidget *parent)
     setCorner( Qt::TopRightCorner, Qt::RightDockWidgetArea );
     setCorner( Qt::TopLeftCorner, Qt::LeftDockWidgetArea );
 
-    for (int i = 0; i < MaxRecentFiles; ++i) {
-        recentFileActs[i] = new QAction(this);
-        recentFileActs[i]->setVisible(false);
-        connect(recentFileActs[i], SIGNAL(triggered()), this, SLOT(openRecentFile()));
-    }
-    
     createMods();
     createMod();
     createHier();
@@ -432,7 +426,7 @@ Ide::Ide(QWidget *parent)
     createLocals();
     createStack();
     createTerminal();
-    createMenu();
+    createModsMenu();
 
     setCentralWidget(d_tab);
 
@@ -706,7 +700,7 @@ void Ide::createLocals()
     connect( d_localsView, SIGNAL(itemExpanded(QTreeWidgetItem*)), this, SLOT(onLocalExpanded(QTreeWidgetItem*)));
 }
 
-void Ide::createMenu()
+void Ide::createModsMenu()
 {
     Gui::AutoMenu* pop = new Gui::AutoMenu( d_mods, true );
     pop->addCommand( "Show File", this, SLOT(onOpenFile()) );
@@ -766,12 +760,6 @@ void Ide::createMenuBar()
     pop->addCommand( "Open Project...", this, SLOT(onOpenPro()), tr("CTRL+O"), false );
     pop->addCommand( "Save Project", this, SLOT(onSavePro()), tr("CTRL+SHIFT+S"), false );
     pop->addCommand( "Save Project as...", this, SLOT(onSaveAs()) );
-
-    separatorAct = pop->addSeparator();
-    for (int i = 0; i < MaxRecentFiles; ++i)
-        pop->addAction(recentFileActs[i]);
-    updateRecentFileActions();
-    
     pop->addSeparator();
     pop->addCommand( "Save", this, SLOT(onSaveFile()), tr("CTRL+S"), false );
     pop->addCommand( tr("Close file"), d_tab, SLOT(onCloseDoc()), tr("CTRL+W") );
@@ -792,10 +780,6 @@ void Ide::createMenuBar()
     pop->addAutoCommand( "Copy", SLOT(handleEditCopy()), tr("CTRL+C"), true );
     pop->addAutoCommand( "Paste", SLOT(handleEditPaste()), tr("CTRL+V"), true );
     pop->addSeparator();
-    pop->addAutoCommand( "Duplicate Line", SLOT(handleEditDupLine()), tr("CTRL+D"), true );
-    pop->addAutoCommand( "UPPER Selection", SLOT(handleEditUpper()), tr("CTRL+SHIFT+U"), true );
-    pop->addAutoCommand( "lower Selection", SLOT(handleEditLower()), tr("CTRL+U"), true );
-    pop->addSeparator();
     pop->addAutoCommand( "Find...", SLOT(handleFind()), tr("CTRL+F"), true );
     pop->addAutoCommand( "Find again", SLOT(handleFindAgain()), tr("F3"), true );
     pop->addAutoCommand( "Replace...", SLOT(handleReplace()) );
@@ -814,6 +798,7 @@ void Ide::createMenuBar()
     pop->addSeparator();
     pop->addCommand( "Set Build Directory...", this, SLOT( onBuildDir() ) );
     pop->addCommand( "Built-in Oakwood", this, SLOT(onOakwood()) );
+    pop->addCommand( "Set Configuration Variables...", this, SLOT( onSetOptions()) );
     pop->addCommand( "Set Oberon File System Root...", this, SLOT( onWorkingDir() ) );
 
     pop = new Gui::AutoMenu( tr("Build && Run"), this );
@@ -824,9 +809,6 @@ void Ide::createMenuBar()
     pop->addCommand( "Export IL...", this, SLOT(onExportIl()) );
     pop->addCommand( "Export C...", this, SLOT(onExportC()) );
     pop->addCommand( "Run", this, SLOT(onRun()), tr("CTRL+R"), false );
-    
-    pop->addSeparator();
-    pop->addCommand( "Clear Output", this, SLOT(onClearTerm()), tr("CTRL+SHIFT+C"), false );
 
     pop = new Gui::AutoMenu( tr("Debug"), this );
     pop->addCommand( "Enable Debugging", this, SLOT(onEnableDebug()),tr(OBN_ENDBG_SC), false );
@@ -942,17 +924,15 @@ void Ide::onOpenPro()
     d_pro->loadFrom(fileName);
 
     compile();
-    setCurrentFile(fileName);
 }
 
 void Ide::onSavePro()
 {
     ENABLED_IF( d_pro->isDirty() );
 
-    if( !d_pro->getProjectPath().isEmpty() ) {
+    if( !d_pro->getProjectPath().isEmpty() )
         d_pro->save();
-        setCurrentFile(d_pro->getProjectPath());
-    } else
+    else
         onSaveAs();
 }
 
@@ -982,7 +962,6 @@ void Ide::onSaveAs()
         fileName += ".obxpro";
 
     d_pro->saveTo(fileName);
-    setCurrentFile(fileName);
     onCaption();
 }
 
@@ -1672,12 +1651,6 @@ void Ide::onBreak()
     //d_dbg->suspend();
 }
 
-void Ide::onClearTerm()
-{
-    ENABLED_IF(true);
-    d_term->clear();
-}
-
 bool Ide::checkSaved(const QString& title)
 {
     if( d_filesDirty )
@@ -1966,7 +1939,7 @@ Ide::Editor* Ide::showEditor(const QString& path, int row, int col, bool setMark
     }else
     {
         edit = new Editor(this,d_pro);
-        createMenu(edit);
+        createModsMenu(edit);
 
         connect(edit, SIGNAL(modificationChanged(bool)), this, SLOT(onEditorChanged()) );
         connect(edit,SIGNAL(cursorPositionChanged()),this,SLOT(onCursor()));
@@ -2028,7 +2001,7 @@ void Ide::showEditor(const Ide::Location& loc)
         e->verticalScrollBar()->setValue(loc.d_yoff);
 }
 
-void Ide::createMenu(Ide::Editor* edit)
+void Ide::createModsMenu(Ide::Editor* edit)
 {
     Gui::AutoMenu* pop = new Gui::AutoMenu( edit, true );
     pop->addCommand( "Save", this, SLOT(onSaveFile()), tr("CTRL+S"), false );
@@ -2980,16 +2953,6 @@ void Ide::clear()
 
 bool Ide::checkEngine(bool withFastasm)
 {
-#ifdef Q_OS_WIN
-    QSettings s("HKEY_LOCAL_MACHINE\\SOFTWARE\\Mono", QSettings::NativeFormat);
-    if (s.contains("SdkInstallRoot")) {
-        d_eng->setMonoDir(s.value("SdkInstallRoot").toString() + "\\bin");
-    } else {
-        d_eng->setMonoDir(QApplication::applicationDirPath() + "\\mono");
-    }
-   return true;
-#else
-    
     QDir monoPath( QApplication::applicationDirPath() );
     if( !monoPath.cd("mono") )
     {
@@ -3006,7 +2969,6 @@ bool Ide::checkEngine(bool withFastasm)
     }
     d_eng->setMonoDir(monoPath.absolutePath());
     return true;
-#endif
 }
 
 static QByteArray monoEscape( const QByteArray& name )
@@ -3377,42 +3339,37 @@ void Ide::onSetInputFile()
     d_eng->setInputFile(path);
 }
 
-void Ide::setCurrentFile(const QString &fileName)
+void Ide::onSetOptions()
 {
-    QSettings settings;
-    QStringList files = settings.value("recentFileList").toStringList();
-    files.removeAll(fileName);
-    files.prepend(fileName);
-    while (files.size() > MaxRecentFiles)
-        files.removeLast();
-    settings.setValue("recentFileList", files);
-    updateRecentFileActions();
-}
+    ENABLED_IF(true);
 
-void Ide::updateRecentFileActions()
-{
-    QSettings settings;
-    QStringList files = settings.value("recentFileList").toStringList();
+    QByteArrayList l = d_pro->getOptions();
+    qSort(l);
 
-    int numRecentFiles = qMin(files.size(), (int)MaxRecentFiles);
+    bool ok;
+    const QString options = QInputDialog::getMultiLineText(this,tr("Set Configuration Variables"),
+                                                           tr("Please enter a unique identifier per variable:"),
+                                                           l.join('\n'), &ok );
+    if( !ok )
+        return;
 
-    for (int i = 0; i < numRecentFiles; ++i) {
-        QString text = tr("&%1 %2").arg(i + 1).arg(QFileInfo(files[i]).fileName());
-        recentFileActs[i]->setText(text);
-        recentFileActs[i]->setData(files[i]);
-        recentFileActs[i]->setVisible(true);
+    Lexer lex;
+    QList<Token> toks = lex.tokens(options);
+    l.clear();
+    QStringList errs;
+    foreach( const Token& t, toks )
+    {
+        if( t.d_type == Tok_ident )
+            l << t.d_val;
+        else
+            errs << QString::fromUtf8(t.d_val);
     }
-    for (int j = numRecentFiles; j < MaxRecentFiles; ++j)
-        recentFileActs[j]->setVisible(false);
 
-    separatorAct->setVisible(numRecentFiles > 0);
-}
+    if( !errs.isEmpty() )
+        QMessageBox::warning(this,tr("Set Configuration Variables"),
+                             tr("The following entries are illegal and ignored: \n%1").arg(errs.join('\n')));
 
-void Ide::openRecentFile()
-{
-    QAction *action = qobject_cast<QAction *>(sender());
-    if (action)
-        loadFile(action->data().toString());
+    d_pro->setOptions(l);
 }
 
 int main(int argc, char *argv[])
@@ -3421,9 +3378,15 @@ int main(int argc, char *argv[])
     a.setOrganizationName("me@rochus-keller.ch");
     a.setOrganizationDomain("github.com/rochus-keller/Oberon");
     a.setApplicationName("Oberon+ IDE (Mono)");
-    a.setApplicationVersion("0.9.65");
+    a.setApplicationVersion("0.9.68");
     a.setStyle("Fusion");    
     QFontDatabase::addApplicationFont(":/font/DejaVuSansMono.ttf"); // "DejaVu Sans Mono"
+
+#ifdef QT_STATIC
+    QFontDatabase::addApplicationFont(":/font/NotoSans.ttf"); // "Noto Sans"
+    QFont af("Noto Sans",10);
+    a.setFont(af);
+#endif
 
 #ifdef Q_OS_MAC
     QDir cur = QCoreApplication::applicationDirPath();
