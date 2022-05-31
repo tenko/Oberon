@@ -30,6 +30,12 @@
 #define OBX_MAX_PATH 300
 static char s_appPath[OBX_MAX_PATH] = {0};
 
+struct OBX$Anyrec$Class$ OBX$Anyrec$class$ = { 
+    0,
+};
+
+struct OBX$Anyrec OBX$defaultException = { &OBX$Anyrec$class$, };
+
 void* OBX$ClassOf(void* inst) { return inst ? ((struct OBX$Inst*)inst)->class$ : 0; }
 
 int OBX$IsSubclass( void* superClass, void* subClass )
@@ -813,5 +819,48 @@ struct OBX$Array$1 OBX$CharToStr( int lwide, wchar_t ch )
 const char* OBX$AppPath()
 {
 	return s_appPath;
+}
+
+// https://stackoverflow.com/questions/23791060/c-thread-local-storage-clang-503-0-40-mac-osx
+#if defined (__GNUC__)
+    #define ATTRIBUTE_TLS __thread
+#elif defined (_MSC_VER)
+    #define ATTRIBUTE_TLS __declspec(thread)
+#else 
+    #define ATTRIBUTE_TLS
+#endif
+static ATTRIBUTE_TLS struct OBX$Jump* jumpStack = 0;
+// TODO: does not yet seem to work in at true mt app; OBX$Alloc blocks or returns 0; 
+// tried with GCC 4.8 on Linux 3 i386, with OBX_USE_BOEHM_GC on 
+
+struct OBX$Jump* OBX$PushJump()
+{
+	struct OBX$Jump* j = OBX$Alloc( sizeof(struct OBX$Jump) );
+	assert( j != 0 );
+	j->inst = 0;
+	if( jumpStack )
+		j->prev = jumpStack;
+	else
+		j->prev = 0;
+	jumpStack = j;
+}
+
+struct OBX$Jump* OBX$TopJump()
+{
+	return jumpStack;
+}
+
+void OBX$PopJump()
+{
+	if( jumpStack )
+	{
+		struct OBX$Jump* j = jumpStack;
+		jumpStack = j->prev;
+#ifdef OBX_USE_BOEHM_GC
+    	GC_FREE(j);
+#else
+     	free(j);
+#endif
+	}
 }
 

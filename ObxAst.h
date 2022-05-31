@@ -225,6 +225,7 @@ namespace Obx
         bool isText(bool* wide = 0, bool resolvePtr = false) const;
         bool isByteArray(bool resolvePtr = false) const;
         Record* toRecord(bool* isPtr = 0) const;
+        Array* toArray(bool* isPtr = 0) const;
         Module* declaredIn();
     };
 
@@ -472,6 +473,7 @@ namespace Obx
                CAST, STRLEN, WCHR, PRINTLN, DEFAULT, BITAND, BITNOT, BITOR, BITXOR,
                BITSHL, BITSHR, BITASR,
                ADR, // obsolete
+               PCALL, RAISE,
                MAXBUILTIN
              };
         static const char* s_typeName[];

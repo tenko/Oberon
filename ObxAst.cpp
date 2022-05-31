@@ -53,7 +53,7 @@ const char* BuiltIn::s_typeName[] =
     "TYP",
     // Oberon+
     "CAST", "STRLEN", "WCHR", "PRINTLN", "DEFAULT", "BITAND", "BITNOT", "BITOR", "BITXOR",
-    "BITSHL", "BITSHR", "BITASR", "ADR"
+    "BITSHL", "BITSHR", "BITASR", "ADR", "PCALL", "RAISE"
 };
 
 const char* UnExpr::s_opName[] =
@@ -1485,6 +1485,25 @@ Record*Type::toRecord(bool* isPtr) const
         t = t->derefed();
     if( t && t->getTag() == Thing::T_Record )
         return cast<Record*>(t);
+    else
+        return 0;
+}
+
+Array*Type::toArray(bool* isPtr) const
+{
+    if( isPtr )
+        *isPtr = false;
+    Type* t = const_cast<Type*>(this)->derefed();
+    if( t && t->getTag() == Thing::T_Pointer )
+    {
+        if( isPtr )
+            *isPtr = true;
+        t = cast<Pointer*>(t)->d_to.data();
+    }
+    if( t )
+        t = t->derefed();
+    if( t && t->getTag() == Thing::T_Array )
+        return cast<Array*>(t);
     else
         return 0;
 }

@@ -594,7 +594,7 @@ struct ValidatorImp : public AstVisitor
                     break;
                 case UnExpr::CALL:
                     if( derefed(e->d_type.data())->getTag() == Thing::T_Pointer )
-                        return true;
+                        return true; // only NAppGUI/HelloGui/Popups.obx so far requires true; see above for concept
                     else
                     {
                         ArgExpr* args = cast<ArgExpr*>(e);
@@ -663,6 +663,51 @@ struct ValidatorImp : public AstVisitor
         case BuiltIn::HALT:
         case BuiltIn::ROR:
             return false; // these can be handled by ordinary arg checker
+
+        case BuiltIn::PCALL:
+            if( args->d_args.size() >= 2 )
+            {
+                // NOTE: PCALL must be a procedure, not a function; if a function it could be called in any expression;
+                // instead a PCALL shall be a call statement, in correspondence with the rule that PCALL can only call
+                // true procedures, which also makes the implementation of the CIL backend easier
+                Type* t0 = derefed(args->d_args[0]->d_type.data() );
+                Type* t1 = derefed(args->d_args[1]->d_type.data() );
+                Named* n1 = args->d_args[1]->getIdent();
+                if( !checkValidLhs(args->d_args[0].data()) || t0 == 0 ||
+                        t0->getTag() != Thing::T_Pointer || derefed(cast<Pointer*>(t0)->d_to.data()) != bt.d_anyRec )
+                    error( args->d_args[0]->d_loc, Validator::tr("first argument must be pointer to anyrec"));
+                else if( n1 && n1->getTag() == Thing::T_BuiltIn )
+                    error( args->d_args[1]->d_loc, Validator::tr("predeclared procedures cannot be used with PCALL"));
+                else if( t1 && t1->getTag() == Thing::T_ProcType )
+                {
+                    ProcType* pt = cast<ProcType*>(t1);
+                    if( pt->d_return.isNull() )
+                    {
+                        // checkValidRhs(args->d_args[1].data()); // forbids non-local access
+                        ArgExpr tmp = *args;
+                        tmp.d_sub = args->d_args[1].data();
+                        tmp.d_args.pop_front();
+                        tmp.d_args.pop_front();
+                        checkCallArgs(pt,&tmp); // PCALL is transparent; this is the actual call
+                    }else
+                        error( args->d_args[1]->d_loc, Validator::tr("function procedures are not supported by PCALL"));
+                }else // td can be null, e.g. when calling new(ptr) as second argument
+                    error( args->d_args[1]->d_loc, Validator::tr("expecting procedure as first argument"));
+            }else
+                error( args->d_loc, Validator::tr("expecting at least two arguments"));
+            break;
+        case BuiltIn::RAISE:
+            if( args->d_args.size() == 0 )
+            {
+                // generates an instance of ANYREC
+            }else if( args->d_args.size() == 1 )
+            {
+                Type* td = derefed(args->d_args.first()->d_type.data() );
+                if( td && ( !isPointerToRecord(td) || td->d_unsafe ) ) // CUNION or CSTRUCT not supported
+                    error( args->d_args.first()->d_loc, Validator::tr("expecting a non-nil pointer to a record"));
+            }else
+                error( args->d_loc, Validator::tr("expecting zero or one arguments"));
+            break;
 
         case BuiltIn::BITNOT:
             if( args->d_args.size() == 1 )
@@ -1019,6 +1064,13 @@ struct ValidatorImp : public AstVisitor
                         return true; // we allow to cast void* to integer
                 }
 
+                if( rhs->isInteger() && ltag == Thing::T_Pointer && lhs->d_unsafe )
+                {
+                    Type* l = derefed(cast<Pointer*>(lhs)->d_to.data());
+                    if( l && l->getBaseType() == Type::CVOID )
+                        return true; // we allow to cast integer to void*
+                }
+
                 if( ( ltag == Thing::T_Enumeration && isInteger(rhs) ) ||
                         ( lhs == bt.d_intType && rhs == bt.d_setType ) ||
                         ( lhs == bt.d_setType && isInteger(rhs) ) ||
@@ -1179,7 +1231,6 @@ struct ValidatorImp : public AstVisitor
             return;
         }
 
-
         const int tftag = tf->getTag();
         Array* af = tftag == Thing::T_Array ? cast<Array*>(tf) : 0;
         const int tatag = ta->getTag();
@@ -1190,6 +1241,7 @@ struct ValidatorImp : public AstVisitor
         if( ( tftag == Thing::T_Record || tftag == Thing::T_Array ) && tatag == Thing::T_Pointer )
         {
             // BBOX does implicit deref of actual pointer when passing to a formal record or array parameter
+            // applies also if ta or tf is unsafe
             Ref<UnExpr> arg = new UnExpr(UnExpr::DEREF, actual.data() );
             arg->d_loc = actual->d_loc;
             Pointer* p = cast<Pointer*>(ta);
@@ -1250,8 +1302,12 @@ struct ValidatorImp : public AstVisitor
         {
             Type* fpt = derefed(cast<Pointer*>(tf)->d_to.data());
             if( fpt->getBaseType() == Type::CVOID )
+            {
+                warning(actual->d_loc,Validator::tr("passing %1 to *VOID").
+                        arg(BaseType::s_typeName[ta->getBaseType()]));
                 return; // allow passing up to 32 bit integers to *void params of unsafe procedures
                         // if we allow it for all procedures this could be misused for pointer arithmetic
+            }
         }
 #endif
 
@@ -1276,7 +1332,15 @@ struct ValidatorImp : public AstVisitor
             }else
                 checkValidLhs(actual.data());
         }
-
+        if( formal->d_var && !formal->d_unsafe && ta->d_unsafe && ta->isStructured() )
+        {
+            error( actual->d_loc, Validator::tr("cannot pass this expression to a VAR or IN parameter") );
+            return;
+        }else if( !formal->d_var && af && !formal->d_unsafe && ta->d_unsafe )
+        {
+            error( actual->d_loc, Validator::tr("cannot pass this expression to an ARRAY parameter") );
+            return;
+        }
         const QString var = formal->d_var ? formal->d_const ? "IN " : "VAR " : "";
 
         checkValidRhs(actual.data());
@@ -1505,8 +1569,14 @@ struct ValidatorImp : public AstVisitor
             }
             break;
         default:
-            Q_ASSERT( bi->d_type && bi->d_type->getTag() == Thing::T_ProcType );
-            return cast<ProcType*>(bi->d_type.data())->d_return.data();
+            {
+                Q_ASSERT( bi->d_type && bi->d_type->getTag() == Thing::T_ProcType );
+                Type* t = cast<ProcType*>(bi->d_type.data())->d_return.data();
+                if( t == 0 )
+                    t = bt.d_noType;
+                return t;
+            }
+            break;
         }
         return 0;
     }
@@ -1564,6 +1634,7 @@ struct ValidatorImp : public AstVisitor
                     me->d_type = p->d_return.data();
                     if( me->d_type.isNull() )
                         me->d_type = bt.d_noType;
+                        // even procs return a type with BaseType::NONE so that the generator knows if to emit a pop
                 }
             }else if( decl && decl->getTag() == Thing::T_NamedType )
             {
@@ -2968,12 +3039,22 @@ struct ValidatorImp : public AstVisitor
 
             if( me->d_typeCase )
             {
-                if( c.d_labels.size() != 1 || c.d_labels.first()->getIdent() == 0 )
+                Type* to = derefed(orig.data());
+                if( c.d_labels.size() == 1 && derefed(c.d_labels.first()->d_type.data()) == bt.d_nilType )
+                {
+                    if( to && isPointerToRecord(to) )
+                        ; // no, just leafe it as is; caseId->d_type = bt.d_nilType;
+                    else
+                    {
+                        error( c.d_labels.first()->d_loc, Validator::tr("nil only acceptable if case variable is a pointer type"));
+                        continue;
+                    }
+                }else if( c.d_labels.size() != 1 || c.d_labels.first()->getIdent() == 0 )
                 {
                     Q_ASSERT(!c.d_labels.isEmpty());
                     error( c.d_labels.first()->d_loc, Validator::tr("expecting a qualident case label in a type case statement"));
                     continue;
-                }else if( !typeExtension( derefed(orig.data()), derefed(c.d_labels.first()->getIdent()->d_type.data()) ) )
+                }else if( !typeExtension( to, derefed(c.d_labels.first()->getIdent()->d_type.data()) ) )
                 {
                     Q_ASSERT(!c.d_labels.isEmpty());
                     error( c.d_labels.first()->d_loc, Validator::tr("case label must be a subtype of the case variable in a type case statement"));
