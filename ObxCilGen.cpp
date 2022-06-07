@@ -3568,6 +3568,8 @@ struct ObxCilGenImp : public AstVisitor
         // WHILE i <= to DO statements; i := i + by END
         // WHILE i >= to DO statements; i := i + by END
 
+        // TODO: caclulate TO only once!
+
         Ref<Assign> a = new Assign();
         a->d_loc = me->d_loc;
         a->d_lhs = me->d_id;
@@ -3596,7 +3598,7 @@ struct ObxCilGenImp : public AstVisitor
         add->d_op = BinExpr::ADD;
         add->d_lhs = me->d_id;
         add->d_rhs = me->d_by;
-        add->d_type = me->d_by->d_type;
+        add->d_type = me->d_id->d_type;
 
         Ref<Assign> a2 = new Assign();
         a2->d_loc = me->d_loc;
@@ -3614,27 +3616,27 @@ struct ObxCilGenImp : public AstVisitor
     {
         me->d_if[0]->accept(this); // IF
         const int afterFirst = emitter->newLabel();
-        line(me->d_loc).brfalse_(afterFirst);
+        line(me->d_if[0]->d_loc).brfalse_(afterFirst);
 
         for( int i = 0; i < me->d_then[0].size(); i++ )
             me->d_then[0][i]->accept(this);
 
         const int afterEnd = emitter->newLabel();
-        line(me->d_loc).br_(afterEnd);
+        line(me->d_if[0]->d_loc).br_(afterEnd);
 
-        line(me->d_loc).label_(afterFirst);
+        line(me->d_if[0]->d_loc).label_(afterFirst);
         for( int i = 1; i < me->d_if.size(); i++ ) // ELSIF
         {
             me->d_if[i]->accept(this);
             const int afterNext = emitter->newLabel();
-            line(me->d_loc).brfalse_(afterNext);
+            line(me->d_if[i]->d_loc).brfalse_(afterNext);
 
             for( int j = 0; j < me->d_then[i].size(); j++ )
                 me->d_then[i][j]->accept(this);
 
-            line(me->d_loc).br_(afterEnd);
+            line(me->d_if[i]->d_loc).br_(afterEnd);
 
-            line(me->d_loc).label_(afterNext);
+            line(me->d_if[i]->d_loc).label_(afterNext);
         }
 
         if( !me->d_else.isEmpty() ) // ELSE
